@@ -114,7 +114,7 @@ test("captures a streamed image and attaches it to the next interactive prompt",
 
   const imageBytes = Buffer.from("test image");
   const imageData = imageBytes.toString("base64");
-  const start = "__PI_TTYD_IMAGE_V1__";
+  const start = "\u001e__PI_TTYD_IMAGE_V1__";
   const end = "__PI_TTYD_IMAGE_END_V1__";
   assert.deepEqual(terminalInput(`${start}image/png\n${imageData.slice(0, 3)}`), { consume: true });
   assert.deepEqual(terminalInput(`${imageData.slice(3)}${end.slice(0, 7)}`), { consume: true });
@@ -150,9 +150,10 @@ test("buffers a split image start marker without leaking it", async () => {
   };
   handlers.get("session_start")({}, ctx);
 
-  const start = "__PI_TTYD_IMAGE_V1__";
+  const start = "\u001e__PI_TTYD_IMAGE_V1__";
   const end = "__PI_TTYD_IMAGE_END_V1__";
   const imageData = Buffer.from("split marker").toString("base64");
+  assert.equal(terminalInput("ordinary_"), undefined);
   assert.deepEqual(terminalInput(`typed ${start.slice(0, 8)}`), { data: "typed " });
   assert.deepEqual(terminalInput(`${start.slice(8)}image/png\n${imageData}${end}`), { consume: true });
   assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), {
@@ -179,7 +180,7 @@ test("attaches multiple image frames coalesced into one terminal read", async ()
   };
   handlers.get("session_start")({}, ctx);
 
-  const start = "__PI_TTYD_IMAGE_V1__";
+  const start = "\u001e__PI_TTYD_IMAGE_V1__";
   const end = "__PI_TTYD_IMAGE_END_V1__";
   const pngData = Buffer.from("first image").toString("base64");
   const jpegData = Buffer.from("second image").toString("base64");
@@ -194,6 +195,68 @@ test("attaches multiple image frames coalesced into one terminal read", async ()
       { type: "image", mimeType: "image/jpeg", data: jpegData },
     ],
   });
+});
+
+test("discards stalled transfers and resynchronizes at the next image", async () => {
+  const handlers = new Map();
+  const notifications = [];
+  let terminalInput;
+  await withEnvironment(undefined, () => {
+    register({ on: (event, handler) => handlers.set(event, handler) });
+  });
+  const ctx = {
+    mode: "tui",
+    ui: {
+      onTerminalInput: (handler) => { terminalInput = handler; return () => {}; },
+      setStatus() {},
+      notify: (...args) => notifications.push(args),
+    },
+  };
+  handlers.get("session_start")({}, ctx);
+
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = new Map();
+  let nextTimerId = 0;
+  globalThis.setTimeout = (callback) => {
+    const id = ++nextTimerId;
+    timers.set(id, callback);
+    return id;
+  };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  const fireTimeout = () => {
+    const id = [...timers.keys()].at(-1);
+    const callback = timers.get(id);
+    timers.delete(id);
+    callback();
+  };
+
+  try {
+    const start = "\u001e__PI_TTYD_IMAGE_V1__";
+    const end = "__PI_TTYD_IMAGE_END_V1__";
+    const oldData = Buffer.from("stalled image").toString("base64");
+    terminalInput(`${start}image/png\n${oldData.slice(0, 4)}`);
+    const firstTimer = [...timers.keys()][0];
+    terminalInput(oldData.slice(4, 8));
+    assert.equal(timers.has(firstTimer), false);
+    fireTimeout();
+    assert.match(notifications.at(-1)[0], /discarded until its end marker or another image drop/);
+    assert.deepEqual(terminalInput(`${oldData.slice(8)}${end}`), { consume: true });
+    assert.equal(terminalInput("ordinary_"), undefined);
+
+    terminalInput(`${start}image/png\n${oldData.slice(0, 4)}`);
+    fireTimeout();
+    const recoveredData = Buffer.from("recovered image").toString("base64");
+    assert.deepEqual(terminalInput(`${start}image/jpeg\n${recoveredData}${end}`), { consume: true });
+    assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), {
+      action: "transform",
+      text: "Describe it",
+      images: [{ type: "image", mimeType: "image/jpeg", data: recoveredData }],
+    });
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });
 
 test("rejects unsupported image payloads", async () => {
@@ -213,7 +276,7 @@ test("rejects unsupported image payloads", async () => {
   };
   handlers.get("session_start")({}, ctx);
 
-  const result = terminalInput("__PI_TTYD_IMAGE_V1__image/svg+xml\nPHN2Zz4=__PI_TTYD_IMAGE_END_V1__");
+  const result = terminalInput("\u001e__PI_TTYD_IMAGE_V1__image/svg+xml\nPHN2Zz4=__PI_TTYD_IMAGE_END_V1__");
   assert.deepEqual(result, { consume: true });
   assert.deepEqual(notifications, [["Rejected an unsupported or invalid ttyd image", "warning"]]);
   assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), { action: "continue" });

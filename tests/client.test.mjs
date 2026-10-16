@@ -135,6 +135,6 @@ test("prevents image drops from navigating and sends them through ttyd input", a
   assert.deepEqual(terminalInput.map((entry) => entry.wasUserInput), [true, true, true]);
   assert.equal(
     terminalInput.map((entry) => entry.data).join(""),
-    `__PI_TTYD_IMAGE_V1__image/png\n${encoded}__PI_TTYD_IMAGE_END_V1__`,
+    `\u001e__PI_TTYD_IMAGE_V1__image/png\n${encoded}__PI_TTYD_IMAGE_END_V1__`,
   );
 });

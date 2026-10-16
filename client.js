@@ -5,7 +5,7 @@
   const readyMarker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+.*)?$/;
   const titleMarker = /^__PI_TTYD_TITLE__:([^\s]*)(?:\s+\|\s+.*)?$/;
   const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
-  const imageTransferStart = "__PI_TTYD_IMAGE_V1__";
+  const imageTransferStart = "\u001e__PI_TTYD_IMAGE_V1__";
   const imageTransferEnd = "__PI_TTYD_IMAGE_END_V1__";
   const maxImageBytes = 4 * 1024 * 1024;
   const chunkSize = 48 * 1024;
