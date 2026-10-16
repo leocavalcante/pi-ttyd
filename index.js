@@ -237,8 +237,8 @@ export default function register(pi) {
         };
       }
 
-      armTransferTimeout(ctx);
       const transfer = incomingTransfer;
+      if (data.replace(/[\u0003\u0004]/g, "").length > 0) armTransferTimeout(ctx);
       const combined = transfer.tail + data;
       const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
       const startIndex = transfer.discarding ? combined.indexOf(IMAGE_TRANSFER_START) : -1;
@@ -254,8 +254,8 @@ export default function register(pi) {
       const body = endIndex < 0
         ? combined.slice(0, combined.length - tailLength)
         : combined.slice(0, endIndex);
-      if (transfer.discarding) appendQuitControls(body, passthrough);
-      appendTransferPayload(transfer, body);
+      appendQuitControls(body, passthrough);
+      appendTransferPayload(transfer, body.replace(/[\u0003\u0004]/g, ""));
 
       if (endIndex < 0) {
         transfer.tail = tailLength === 0 ? "" : combined.slice(-tailLength);

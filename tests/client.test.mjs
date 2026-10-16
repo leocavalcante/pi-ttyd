@@ -39,6 +39,7 @@ const createImageDropHarness = () => {
   const warnings = [];
   let nextTimeoutId = 0;
   let onTitleChange;
+  let onMutation;
   let titleValue = "ttyd - Terminal";
   const titleElement = {};
   const document = {
@@ -61,23 +62,33 @@ const createImageDropHarness = () => {
       input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
     },
   };
+  class MockMutationObserver {
+    constructor(callback) { onMutation = callback; }
+    observe() {}
+  }
 
   runInNewContext(clientSource, {
     document,
     window,
+    MutationObserver: MockMutationObserver,
     btoa,
     console: { warn: (...args) => warnings.push(args) },
   });
 
+  const writePageTitle = (title) => {
+    document.title = title;
+    onMutation();
+  };
   const emitTitle = (title, ttydUpdatesAfter = false) => {
-    if (!ttydUpdatesAfter) document.title = title;
+    if (!ttydUpdatesAfter) writePageTitle(title);
     onTitleChange(title);
-    if (ttydUpdatesAfter) document.title = `${title} | ttyd`;
+    if (ttydUpdatesAfter) writePageTitle(`${title} | ttyd`);
   };
 
   return {
     document,
     emitTitle,
+    writePageTitle,
     terminalInput,
     timeouts,
     warnings,
@@ -94,6 +105,7 @@ const createImageDropHarness = () => {
 test("processes terminal title events and restores its custom title after a ready notification", async () => {
   const notifications = [];
   let onTitleChange;
+  let onMutation;
   let restoreTitle;
   const titleElement = {};
   let titleValue = "shell prompt | ttyd";
@@ -112,8 +124,13 @@ test("processes terminal title events and restores its custom title after a read
     static permission = "granted";
     constructor(title, options) { notifications.push({ title, options }); }
   }
+  class MockMutationObserver {
+    constructor(callback) { onMutation = callback; }
+    observe() {}
+  }
   const emitTitle = (title) => {
     document.title = title;
+    onMutation();
     onTitleChange(title);
   };
   const window = {
@@ -126,7 +143,12 @@ test("processes terminal title events and restores its custom title after a read
     term: { onTitleChange(callback) { onTitleChange = callback; } },
   };
 
-  runInNewContext(clientSource, { document, window, Notification: MockNotification });
+  runInNewContext(clientSource, {
+    document,
+    window,
+    Notification: MockNotification,
+    MutationObserver: MockMutationObserver,
+  });
   assert.equal(document.title, "ttyd");
 
   const requestedTitle = "Checkout  staging | agent 2";
@@ -205,6 +227,30 @@ test("reconciles the managed title after ttyd title listeners in either order", 
   assert.equal(harness.document.title, "Managed title");
 });
 
+test("reconciles direct startup and reconnect title writes without parsing them", async () => {
+  const harness = createImageDropHarness();
+
+  harness.writePageTitle("ttyd - Terminal");
+  await Promise.resolve();
+  assert.equal(harness.document.title, "ttyd");
+
+  harness.emitTitle("__PI_TTYD_TITLE__:Managed%20title");
+  await Promise.resolve();
+  assert.equal(harness.document.title, "Managed title");
+
+  harness.writePageTitle("ttyd - Terminal");
+  await Promise.resolve();
+  assert.equal(harness.document.title, "Managed title");
+
+  harness.writePageTitle("__PI_TTYD_TITLE__:Unobserved%20marker");
+  await Promise.resolve();
+  assert.equal(harness.document.title, "__PI_TTYD_TITLE__:Unobserved%20marker");
+
+  harness.writePageTitle("ttyd - Terminal");
+  await Promise.resolve();
+  assert.equal(harness.document.title, "Managed title");
+});
+
 test("subscribes after ttyd initializes the terminal", async () => {
   let retrySubscription;
   let titleListener;
@@ -227,11 +273,15 @@ test("subscribes after ttyd initializes the terminal", async () => {
     term: undefined,
   };
 
-  runInNewContext(clientSource, { document, window, btoa });
+  class MockMutationObserver {
+    observe() {}
+  }
+  runInNewContext(clientSource, { document, window, btoa, MutationObserver: MockMutationObserver });
   assert.equal(typeof retrySubscription, "function");
+  document.title = "__PI_TTYD_TITLE__:Initialized%20late";
   window.term = { onTitleChange(callback) { titleListener = callback; } };
   retrySubscription();
-  titleListener("__PI_TTYD_TITLE__:Initialized%20late");
+  assert.equal(typeof titleListener, "function");
   await Promise.resolve();
   assert.equal(document.title, "Initialized late");
 });
@@ -243,6 +293,7 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   const warnings = [];
   let nextTimeoutId = 0;
   let onTitleChange;
+  let onMutation;
   let focused = false;
   let firstReadStarted = false;
   let secondReadStarted = false;
@@ -273,6 +324,10 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
       input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
     },
   };
+  class MockMutationObserver {
+    constructor(callback) { onMutation = callback; }
+    observe() {}
+  }
   const firstBytes = Uint8Array.of(1, 2, 3, 4);
   const secondBytes = Uint8Array.of(5, 6, 7, 8);
   const firstFile = {
@@ -296,11 +351,13 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
 
   const emitTitle = (title) => {
     document.title = title;
+    onMutation();
     onTitleChange(title);
   };
   runInNewContext(clientSource, {
     document,
     window,
+    MutationObserver: MockMutationObserver,
     btoa,
     console: { warn: (...args) => warnings.push(args) },
   });
@@ -481,9 +538,13 @@ test("does not send dropped image data without an active Pi receiver", async () 
     },
   };
 
+  class MockMutationObserver {
+    observe() {}
+  }
   runInNewContext(clientSource, {
     document,
     window,
+    MutationObserver: MockMutationObserver,
     btoa,
     console: { warn: (...args) => warnings.push(args) },
   });

@@ -481,6 +481,11 @@ test("uses one inactivity timer and discards stalled transfers before resynchron
     assert.equal(timers.size, 1);
     assert.equal(timers.has(firstTimer), true);
 
+    now = 25_000;
+    assert.deepEqual(terminalInput("\u0003\u0004"), { data: "\u0003\u0004" });
+    assert.equal(timers.size, 1);
+    assert.equal(timers.has(firstTimer), true);
+
     now = 30_000;
     fireTimeout(firstTimer);
     assert.equal(notifications.length, 0);

@@ -270,6 +270,24 @@
     }
   };
 
+  const observer = new MutationObserver(() => {
+    const title = document.title;
+    if (
+      title !== (readyFlashTitle ?? currentTitle) &&
+      !title.startsWith("__PI_TTYD__:") &&
+      !title.startsWith("__PI_TTYD_TITLE__:") &&
+      !title.startsWith("__PI_TTYD_IMAGE_RX__:")
+    ) {
+      scheduleTitleReconciliation();
+    }
+  });
+  observer.observe(titleElement, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  window.__piTtydTitleObserver = observer;
+
   const subscribeToTerminalTitles = () => {
     const terminal = window.term;
     if (terminal && typeof terminal.onTitleChange === "function") {
