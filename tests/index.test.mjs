@@ -471,13 +471,12 @@ test("uses one inactivity timer and discards stalled transfers before resynchron
     const start = "\u001e__PI_TTYD_IMAGE_V1__";
     const end = "__PI_TTYD_IMAGE_END_V1__";
     const oldData = Buffer.from("stalled image").toString("base64");
-    const firstFramePart = `${start}image/png\u001f${oldData.slice(0, 4)}`;
-    for (const character of firstFramePart) terminalInput(character);
+    assert.deepEqual(terminalInput(start), { consume: true });
     const firstTimer = [...timers.keys()][0];
     assert.equal(timers.size, 1);
 
     now = 20_000;
-    for (const character of oldData.slice(4, 8)) terminalInput(character);
+    for (const character of oldData.slice(0, 4)) terminalInput(character);
     assert.equal(timers.size, 1);
     assert.equal(timers.has(firstTimer), true);
 
@@ -497,7 +496,7 @@ test("uses one inactivity timer and discards stalled transfers before resynchron
     assert.match(notifications.at(-1)[0], /discarded until its end marker or another image drop/);
     assert.deepEqual(terminalInput("\u0003\u0004"), { data: "\u0003\u0004" });
     assert.deepEqual(terminalInput("still discarded"), { consume: true });
-    assert.deepEqual(terminalInput(`${oldData.slice(8)}${end}`), { consume: true });
+    assert.deepEqual(terminalInput(`${oldData.slice(4)}${end}`), { consume: true });
     assert.equal(terminalInput("ordinary_"), undefined);
 
     terminalInput(`${start}image/png\u001f${oldData.slice(0, 4)}`);

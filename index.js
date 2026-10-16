@@ -235,6 +235,7 @@ export default function register(pi) {
           discarding: false,
           lastActivityAt: Date.now(),
         };
+        armTransferTimeout(ctx);
       }
 
       const transfer = incomingTransfer;
