@@ -490,6 +490,8 @@ test("uses one inactivity timer and discards stalled transfers before resynchron
     now = 50_000;
     fireTimeout();
     assert.match(notifications.at(-1)[0], /discarded until its end marker or another image drop/);
+    assert.deepEqual(terminalInput("\u0003\u0004"), { data: "\u0003\u0004" });
+    assert.deepEqual(terminalInput("still discarded"), { consume: true });
     assert.deepEqual(terminalInput(`${oldData.slice(8)}${end}`), { consume: true });
     assert.equal(terminalInput("ordinary_"), undefined);
 

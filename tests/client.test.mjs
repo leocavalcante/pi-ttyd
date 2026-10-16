@@ -139,6 +139,10 @@ test("processes terminal title events and restores its custom title after a read
   await Promise.resolve();
   assert.equal(document.title, customTitle);
 
+  emitTitle("__PI_TTYD_TITLE__:%");
+  await Promise.resolve();
+  assert.equal(document.title, customTitle);
+
   emitTitle("__PI_TTYD__:123:456:1 | ttyd");
   await Promise.resolve();
   assert.equal(notifications.length, 1);

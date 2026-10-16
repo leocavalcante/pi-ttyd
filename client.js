@@ -224,7 +224,13 @@
 
       const titleMatch = titleMarker.exec(title);
       if (titleMatch) {
-        currentTitle = normalizeTitle(decodeURIComponent(titleMatch[1])) || "ttyd";
+        let decodedTitle;
+        try {
+          decodedTitle = decodeURIComponent(titleMatch[1]);
+        } catch {
+          return;
+        }
+        currentTitle = normalizeTitle(decodedTitle) || "ttyd";
         readyFlashTitle = undefined;
         window.clearTimeout(restoreTimer);
         return;

@@ -179,6 +179,11 @@ export default function register(pi) {
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_END),
   );
 
+  const appendQuitControls = (text, passthrough) => {
+    const controls = text.match(/[\u0003\u0004]/g);
+    if (controls) passthrough.push(...controls);
+  };
+
   const appendTransferPayload = (transfer, body) => {
     if (transfer.discarding || transfer.tooLarge || transfer.invalid || body.length === 0) return;
     if (transfer.payloadLength + body.length > MAX_IMAGE_PAYLOAD_CHARS) {
@@ -238,6 +243,7 @@ export default function register(pi) {
       const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
       const startIndex = transfer.discarding ? combined.indexOf(IMAGE_TRANSFER_START) : -1;
       if (startIndex >= 0 && (endIndex < 0 || startIndex < endIndex)) {
+        if (transfer.discarding) appendQuitControls(combined.slice(0, startIndex), passthrough);
         clearIncomingTransfer();
         data = combined.slice(startIndex);
         modified = true;
@@ -248,6 +254,7 @@ export default function register(pi) {
       const body = endIndex < 0
         ? combined.slice(0, combined.length - tailLength)
         : combined.slice(0, endIndex);
+      if (transfer.discarding) appendQuitControls(body, passthrough);
       appendTransferPayload(transfer, body);
 
       if (endIndex < 0) {
