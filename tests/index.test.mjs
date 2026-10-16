@@ -134,6 +134,68 @@ test("captures a streamed image and attaches it to the next interactive prompt",
   assert.deepEqual(inputHandler({ source: "interactive", text: "Next" }, ctx), { action: "continue" });
 });
 
+test("buffers a split image start marker without leaking it", async () => {
+  const handlers = new Map();
+  let terminalInput;
+  await withEnvironment(undefined, () => {
+    register({ on: (event, handler) => handlers.set(event, handler) });
+  });
+  const ctx = {
+    mode: "tui",
+    ui: {
+      onTerminalInput: (handler) => { terminalInput = handler; return () => {}; },
+      setStatus() {},
+      notify() {},
+    },
+  };
+  handlers.get("session_start")({}, ctx);
+
+  const start = "__PI_TTYD_IMAGE_V1__";
+  const end = "__PI_TTYD_IMAGE_END_V1__";
+  const imageData = Buffer.from("split marker").toString("base64");
+  assert.deepEqual(terminalInput(`typed ${start.slice(0, 8)}`), { data: "typed " });
+  assert.deepEqual(terminalInput(`${start.slice(8)}image/png\n${imageData}${end}`), { consume: true });
+  assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), {
+    action: "transform",
+    text: "Describe it",
+    images: [{ type: "image", mimeType: "image/png", data: imageData }],
+  });
+});
+
+test("attaches multiple image frames coalesced into one terminal read", async () => {
+  const handlers = new Map();
+  const statuses = [];
+  let terminalInput;
+  await withEnvironment(undefined, () => {
+    register({ on: (event, handler) => handlers.set(event, handler) });
+  });
+  const ctx = {
+    mode: "tui",
+    ui: {
+      onTerminalInput: (handler) => { terminalInput = handler; return () => {}; },
+      setStatus: (...args) => statuses.push(args),
+      notify() {},
+    },
+  };
+  handlers.get("session_start")({}, ctx);
+
+  const start = "__PI_TTYD_IMAGE_V1__";
+  const end = "__PI_TTYD_IMAGE_END_V1__";
+  const pngData = Buffer.from("first image").toString("base64");
+  const jpegData = Buffer.from("second image").toString("base64");
+  const frames = `${start}image/png\n${pngData}${end}${start}image/jpeg\n${jpegData}${end}`;
+  assert.deepEqual(terminalInput(`typed ${frames} text`), { data: "typed  text" });
+  assert.deepEqual(statuses.at(-1), ["pi-ttyd-images", "2 images ready"]);
+  assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe them" }, ctx), {
+    action: "transform",
+    text: "Describe them",
+    images: [
+      { type: "image", mimeType: "image/png", data: pngData },
+      { type: "image", mimeType: "image/jpeg", data: jpegData },
+    ],
+  });
+});
+
 test("rejects unsupported image payloads", async () => {
   const handlers = new Map();
   const notifications = [];

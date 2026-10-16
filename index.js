@@ -45,6 +45,7 @@ export default function register(pi) {
   let pendingImages = [];
   let incomingTransfer;
   let transferTimeout;
+  let unmatchedStart = "";
   let unsubscribeTerminalInput;
 
   const clearIncomingTransfer = () => {
@@ -77,55 +78,78 @@ export default function register(pi) {
     ctx.ui.notify("Image ready for the next prompt", "info");
   };
 
+  const trailingStartPrefixLength = (text) => {
+    const maxLength = Math.min(text.length, IMAGE_TRANSFER_START.length - 1);
+    for (let length = maxLength; length > 0; length--) {
+      if (text.endsWith(IMAGE_TRANSFER_START.slice(0, length))) return length;
+    }
+    return 0;
+  };
+
   const handleTerminalInput = (data, ctx) => {
-    let prefix = "";
-    if (!incomingTransfer) {
-      const startIndex = data.indexOf(IMAGE_TRANSFER_START);
-      if (startIndex < 0) return;
+    if (!data) return;
 
-      prefix = data.slice(0, startIndex);
-      incomingTransfer = { payload: "", tail: "", tooLarge: false };
-      transferTimeout = setTimeout(() => {
-        incomingTransfer = undefined;
-        transferTimeout = undefined;
-        ctx.ui.notify("ttyd image transfer timed out", "warning");
-      }, IMAGE_TRANSFER_TIMEOUT_MS);
-      transferTimeout.unref?.();
-      data = data.slice(startIndex + IMAGE_TRANSFER_START.length);
-    }
+    let modified = Boolean(incomingTransfer || unmatchedStart);
+    const passthrough = [];
+    while (data.length > 0) {
+      if (!incomingTransfer) {
+        const combined = unmatchedStart + data;
+        unmatchedStart = "";
+        const startIndex = combined.indexOf(IMAGE_TRANSFER_START);
+        if (startIndex < 0) {
+          const partialLength = trailingStartPrefixLength(combined);
+          if (partialLength === 0 && !modified) return;
+          passthrough.push(combined.slice(0, combined.length - partialLength));
+          unmatchedStart = combined.slice(combined.length - partialLength);
+          break;
+        }
 
-    const transfer = incomingTransfer;
-    const combined = transfer.tail + data;
-    const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
-    const body = endIndex < 0
-      ? combined.slice(0, Math.max(0, combined.length - IMAGE_TRANSFER_END.length + 1))
-      : combined.slice(0, endIndex);
-
-    if (!transfer.tooLarge) {
-      if (transfer.payload.length + body.length > MAX_IMAGE_PAYLOAD_CHARS) {
-        transfer.tooLarge = true;
-        transfer.payload = "";
-      } else {
-        transfer.payload += body;
+        modified = true;
+        passthrough.push(combined.slice(0, startIndex));
+        data = combined.slice(startIndex + IMAGE_TRANSFER_START.length);
+        incomingTransfer = { payload: "", tail: "", tooLarge: false };
+        transferTimeout = setTimeout(() => {
+          incomingTransfer = undefined;
+          transferTimeout = undefined;
+          ctx.ui.notify("ttyd image transfer timed out", "warning");
+        }, IMAGE_TRANSFER_TIMEOUT_MS);
+        transferTimeout.unref?.();
       }
+
+      const transfer = incomingTransfer;
+      const combined = transfer.tail + data;
+      const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
+      const body = endIndex < 0
+        ? combined.slice(0, Math.max(0, combined.length - IMAGE_TRANSFER_END.length + 1))
+        : combined.slice(0, endIndex);
+
+      if (!transfer.tooLarge) {
+        if (transfer.payload.length + body.length > MAX_IMAGE_PAYLOAD_CHARS) {
+          transfer.tooLarge = true;
+          transfer.payload = "";
+        } else {
+          transfer.payload += body;
+        }
+      }
+
+      if (endIndex < 0) {
+        transfer.tail = combined.slice(-Math.min(combined.length, IMAGE_TRANSFER_END.length - 1));
+        break;
+      }
+
+      data = combined.slice(endIndex + IMAGE_TRANSFER_END.length);
+      const { payload, tooLarge } = transfer;
+      clearIncomingTransfer();
+      if (tooLarge) {
+        ctx.ui.notify("ttyd images must be 4 MiB or smaller", "warning");
+      } else {
+        acceptImage(payload, ctx);
+      }
+      modified = true;
     }
 
-    if (endIndex < 0) {
-      transfer.tail = combined.slice(-Math.min(combined.length, IMAGE_TRANSFER_END.length - 1));
-      return prefix ? { data: prefix } : { consume: true };
-    }
-
-    const remainder = combined.slice(endIndex + IMAGE_TRANSFER_END.length);
-    const { payload, tooLarge } = transfer;
-    clearIncomingTransfer();
-    if (tooLarge) {
-      ctx.ui.notify("ttyd images must be 4 MiB or smaller", "warning");
-    } else {
-      acceptImage(payload, ctx);
-    }
-
-    const passthrough = prefix + remainder;
-    return passthrough ? { data: passthrough } : { consume: true };
+    const text = passthrough.join("");
+    return text ? { data: text } : { consume: true };
   };
 
   if (notificationsEnabled) {
@@ -151,6 +175,7 @@ export default function register(pi) {
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
     clearIncomingTransfer();
+    unmatchedStart = "";
     pendingImages = [];
     updatePendingStatus(ctx);
 
@@ -164,6 +189,7 @@ export default function register(pi) {
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
     clearIncomingTransfer();
+    unmatchedStart = "";
     pendingImages = [];
     updatePendingStatus(ctx);
   });
