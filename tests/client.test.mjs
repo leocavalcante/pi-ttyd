@@ -69,9 +69,10 @@ const createImageDropHarness = () => {
     console: { warn: (...args) => warnings.push(args) },
   });
 
-  const emitTitle = (title) => {
-    document.title = title;
+  const emitTitle = (title, ttydUpdatesAfter = false) => {
+    if (!ttydUpdatesAfter) document.title = title;
     onTitleChange(title);
+    if (ttydUpdatesAfter) document.title = `${title} | ttyd`;
   };
 
   return {
@@ -90,7 +91,7 @@ const createImageDropHarness = () => {
   };
 };
 
-test("processes terminal title events and restores its custom title after a ready notification", () => {
+test("processes terminal title events and restores its custom title after a ready notification", async () => {
   const notifications = [];
   let onTitleChange;
   let restoreTitle;
@@ -131,12 +132,15 @@ test("processes terminal title events and restores its custom title after a read
   const requestedTitle = "Checkout  staging | agent 2";
   const customTitle = "Checkout staging | agent 2";
   emitTitle(`__PI_TTYD_TITLE__:${encodeURIComponent(requestedTitle)} | ttyd`);
+  await Promise.resolve();
   assert.equal(document.title, customTitle);
 
   emitTitle("shell prompt | ttyd");
+  await Promise.resolve();
   assert.equal(document.title, customTitle);
 
   emitTitle("__PI_TTYD__:123:456:1 | ttyd");
+  await Promise.resolve();
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].title, "Pi");
   assert.equal(notifications[0].options.body, "Ready for input");
@@ -172,12 +176,60 @@ test("handles back-to-back receiver and ready title events in either order", asy
     }
 
     await flushUntil(() => imageRead && harness.terminalInput.length === 2);
+    await Promise.resolve();
     const recheckQueryId = imageReceiverQueryId(harness.terminalInput.at(-1).data);
     harness.emitTitle(`__PI_TTYD_IMAGE_RX__:${recheckQueryId}:ready`);
     await dropPromise;
     assert.equal(imageRead, true);
     assert.equal(harness.document.title, "Pi ready | ttyd");
   }
+});
+
+test("reconciles the managed title after ttyd title listeners in either order", async () => {
+  const harness = createImageDropHarness();
+
+  harness.emitTitle("__PI_TTYD_TITLE__:Managed%20title", true);
+  await Promise.resolve();
+  assert.equal(harness.document.title, "Managed title");
+
+  harness.emitTitle("Managed title", true);
+  await Promise.resolve();
+  assert.equal(harness.document.title, "Managed title");
+
+  harness.emitTitle("__PI_TTYD_TITLE__:Managed%20title | ttyd");
+  await Promise.resolve();
+  assert.equal(harness.document.title, "Managed title");
+});
+
+test("subscribes after ttyd initializes the terminal", async () => {
+  let retrySubscription;
+  let titleListener;
+  let titleValue = "ttyd - Terminal";
+  const titleElement = {};
+  const document = {
+    hidden: false,
+    get title() { return titleValue; },
+    set title(title) { titleValue = title; },
+    querySelector: () => titleElement,
+    addEventListener() {},
+  };
+  const window = {
+    clearTimeout() {},
+    setTimeout(callback, delay) {
+      assert.equal(delay, 50);
+      retrySubscription = callback;
+      return 1;
+    },
+    term: undefined,
+  };
+
+  runInNewContext(clientSource, { document, window, btoa });
+  assert.equal(typeof retrySubscription, "function");
+  window.term = { onTitleChange(callback) { titleListener = callback; } };
+  retrySubscription();
+  titleListener("__PI_TTYD_TITLE__:Initialized%20late");
+  await Promise.resolve();
+  assert.equal(document.title, "Initialized late");
 });
 
 test("waits for a Pi receiver and serializes concurrent image drops", async () => {

@@ -28,6 +28,7 @@
   let lastEventId = "";
   let readyFlashTitle;
   let restoreTimer;
+  let titleReconciliationQueued = false;
   let imageReceiverActive = false;
   let imageReceiverQuerySequence = Math.floor(Math.random() * imageReceiverQueryIdLimit);
   let imageReceiverRequest;
@@ -194,70 +195,85 @@
     document.title = title;
   };
 
+  const scheduleTitleReconciliation = () => {
+    if (titleReconciliationQueued) return;
+    titleReconciliationQueued = true;
+    Promise.resolve().then(() => {
+      titleReconciliationQueued = false;
+      setPageTitle(readyFlashTitle ?? currentTitle);
+    });
+  };
+
   const handleTitleChange = (title) => {
     if (typeof title !== "string") return;
 
-    const receiverMatch = imageReceiverMarker.exec(title);
-    if (receiverMatch) {
-      const [, queryId, state] = receiverMatch;
-      const active = state === "ready";
-      if (queryId && imageReceiverRequest?.id === queryId) {
-        imageReceiverActive = active;
-        resolveImageReceiverRequest(queryId, active);
-      } else if (!queryId && !active) {
-        imageReceiverActive = false;
-        if (imageReceiverRequest) resolveImageReceiverRequest(imageReceiverRequest.id, false);
-      }
-      setPageTitle(readyFlashTitle ?? currentTitle);
-      return;
-    }
-
-    const titleMatch = titleMarker.exec(title);
-    if (titleMatch) {
-      try {
-        currentTitle = normalizeTitle(decodeURIComponent(titleMatch[1])) || "ttyd";
-      } catch {
+    try {
+      const receiverMatch = imageReceiverMarker.exec(title);
+      if (receiverMatch) {
+        const [, queryId, state] = receiverMatch;
+        const active = state === "ready";
+        if (queryId && imageReceiverRequest?.id === queryId) {
+          imageReceiverActive = active;
+          resolveImageReceiverRequest(queryId, active);
+        } else if (!queryId && !active) {
+          imageReceiverActive = false;
+          if (imageReceiverRequest) resolveImageReceiverRequest(imageReceiverRequest.id, false);
+        }
         return;
       }
-      readyFlashTitle = undefined;
-      window.clearTimeout(restoreTimer);
-      setPageTitle(currentTitle);
-      return;
-    }
 
-    const readyMatch = readyMarker.exec(title);
-    if (readyMatch) {
-      const eventId = readyMatch.slice(1, 4).join(":");
-      if (eventId === lastEventId) return;
-      lastEventId = eventId;
-
-      if (
-        document.hidden &&
-        "Notification" in window &&
-        Notification.permission === "granted"
-      ) {
-        new Notification("Pi", { body: "Ready for input" });
+      const titleMatch = titleMarker.exec(title);
+      if (titleMatch) {
+        currentTitle = normalizeTitle(decodeURIComponent(titleMatch[1])) || "ttyd";
+        readyFlashTitle = undefined;
+        window.clearTimeout(restoreTimer);
+        return;
       }
 
-      const flashedTitle = `Pi ready | ${currentTitle}`;
-      readyFlashTitle = flashedTitle;
-      setPageTitle(flashedTitle);
-      window.clearTimeout(restoreTimer);
-      restoreTimer = window.setTimeout(() => {
-        if (readyFlashTitle === flashedTitle) readyFlashTitle = undefined;
-        if (document.title === flashedTitle) setPageTitle(currentTitle);
-        restoreTimer = undefined;
-      }, 5000);
-      return;
-    }
+      const readyMatch = readyMarker.exec(title);
+      if (readyMatch) {
+        const eventId = readyMatch.slice(1, 4).join(":");
+        if (eventId === lastEventId) return;
+        lastEventId = eventId;
 
-    if (title !== currentTitle) {
-      readyFlashTitle = undefined;
-      window.clearTimeout(restoreTimer);
-      setPageTitle(currentTitle);
+        if (
+          document.hidden &&
+          "Notification" in window &&
+          Notification.permission === "granted"
+        ) {
+          new Notification("Pi", { body: "Ready for input" });
+        }
+
+        const flashedTitle = `Pi ready | ${currentTitle}`;
+        readyFlashTitle = flashedTitle;
+        window.clearTimeout(restoreTimer);
+        restoreTimer = window.setTimeout(() => {
+          if (readyFlashTitle === flashedTitle) readyFlashTitle = undefined;
+          if (document.title === flashedTitle) setPageTitle(currentTitle);
+          restoreTimer = undefined;
+        }, 5000);
+        return;
+      }
+
+      if (title !== currentTitle) {
+        readyFlashTitle = undefined;
+        window.clearTimeout(restoreTimer);
+      }
+    } finally {
+      scheduleTitleReconciliation();
     }
   };
 
-  window.term?.onTitleChange?.(handleTitleChange);
+  const subscribeToTerminalTitles = () => {
+    const terminal = window.term;
+    if (terminal && typeof terminal.onTitleChange === "function") {
+      terminal.onTitleChange(handleTitleChange);
+      handleTitleChange(document.title);
+      return;
+    }
+    window.setTimeout(subscribeToTerminalTitles, 50);
+  };
+
+  subscribeToTerminalTitles();
   setPageTitle(currentTitle);
 })();
