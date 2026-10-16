@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import register from "../index.js";
 
+const imageReceiverQueryPrefix = "\u0000".repeat(3);
+const imageReceiverQueryStart = "\u0005";
+const imageReceiverQueryEnd = "\u0006";
+const imageReceiverQuery = (id) =>
+  `${imageReceiverQueryPrefix}${imageReceiverQueryStart}${"\u0000".repeat(id)}${imageReceiverQueryEnd}`;
+
 async function withEnvironment(values, callback) {
   const previous = new Map();
   for (const [key, value] of Object.entries(values)) {
@@ -121,14 +127,22 @@ test("answers explicitly framed receiver queries split by delayed terminal reads
         },
       };
       handlers.get("session_start")({}, ctx);
-      const query = `\u0005${"\u0000".repeat(15)}\u0006`;
-      assert.deepEqual(terminalInput(`typed ${query.slice(0, 4)}`), { data: `typed ${query.slice(0, 4)}` });
+      const query = imageReceiverQuery(12);
+      assert.deepEqual(
+        terminalInput(`typed ${query.slice(0, imageReceiverQueryPrefix.length)}`),
+        { data: `typed ${imageReceiverQueryPrefix}` },
+      );
       assert.deepEqual(output, []);
       await new Promise((resolve) => setTimeout(resolve, 35));
-      assert.deepEqual(terminalInput(query.slice(4, 8)), { data: query.slice(4, 8) });
+      assert.deepEqual(terminalInput(query.slice(3, 4)), { consume: true });
       assert.deepEqual(output, []);
       await new Promise((resolve) => setTimeout(resolve, 35));
-      assert.deepEqual(terminalInput(query.slice(8)), { data: query.slice(8) });
+      assert.deepEqual(terminalInput(query.slice(4, 8)), { consume: true });
+      assert.deepEqual(output, []);
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      assert.deepEqual(terminalInput(query.slice(8, -1)), { consume: true });
+      assert.deepEqual(output, []);
+      assert.deepEqual(terminalInput(query.slice(-1)), { consume: true });
       assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:12:ready\x07"]);
 
       handlers.get("session_shutdown")({}, ctx);
@@ -171,17 +185,17 @@ test("resynchronizes after a split receiver query interrupts an image transfer",
 
     const start = "\u001e__PI_TTYD_IMAGE_V1__";
     const end = "__PI_TTYD_IMAGE_END_V1__";
-    const queryFrame = (id) => `\u0005${"\u0000".repeat(3 + id)}\u0006`;
     const partialData = Buffer.from("interrupted image").toString("base64");
     assert.deepEqual(terminalInput(`${start}image/png\u001f${partialData}${end.slice(0, 6)}`), { consume: true });
 
-    const firstQuery = queryFrame(2);
-    assert.deepEqual(terminalInput(firstQuery.slice(0, 4)), { data: firstQuery.slice(0, 4) });
-    assert.deepEqual(terminalInput(firstQuery.slice(4)), { data: firstQuery.slice(4) });
+    const firstQuery = imageReceiverQuery(2);
+    assert.deepEqual(terminalInput(firstQuery.slice(0, 3)), { data: imageReceiverQueryPrefix });
+    assert.deepEqual(terminalInput(firstQuery.slice(3, 4)), { consume: true });
+    assert.deepEqual(terminalInput(firstQuery.slice(4)), { consume: true });
     assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:2:ready\x07"]);
 
-    const secondQuery = queryFrame(3);
-    assert.deepEqual(terminalInput(secondQuery), { data: secondQuery });
+    const secondQuery = imageReceiverQuery(3);
+    assert.deepEqual(terminalInput(secondQuery), { data: imageReceiverQueryPrefix });
     assert.deepEqual(output, [
       "\x1b]2;__PI_TTYD_IMAGE_RX__:2:ready\x07",
       "\x1b]2;__PI_TTYD_IMAGE_RX__:3:ready\x07",
@@ -207,7 +221,7 @@ test("resynchronizes after a split receiver query interrupts an image transfer",
   }
 });
 
-test("preserves ordinary NUL and query delimiter input", () => {
+test("preserves ordinary controls and emits no receiver markers before a handshake", () => {
   const handlers = new Map();
   const output = [];
   let terminalInput;
@@ -233,11 +247,11 @@ test("preserves ordinary NUL and query delimiter input", () => {
     };
     handlers.get("session_start")({}, ctx);
     assert.deepEqual(terminalInput("\u0000"), { data: "\u0000" });
-    assert.deepEqual(terminalInput("\u0005"), { data: "\u0005" });
-    assert.deepEqual(terminalInput("\u0006"), { data: "\u0006" });
+    assert.deepEqual(terminalInput(imageReceiverQueryStart), { data: imageReceiverQueryStart });
+    assert.deepEqual(terminalInput(imageReceiverQueryEnd), { data: imageReceiverQueryEnd });
     assert.deepEqual(terminalInput("\u0000"), { data: "\u0000" });
     handlers.get("session_shutdown")({}, ctx);
-    assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:inactive\x07"]);
+    assert.deepEqual(output, []);
   } finally {
     process.stdout.write = originalWrite;
     if (originalNotify === undefined) delete process.env.PI_TTYD_NOTIFY;
@@ -275,10 +289,10 @@ test("clears partial image starts after a receiver query", () => {
 
     const start = "\u001e__PI_TTYD_IMAGE_V1__";
     const end = "__PI_TTYD_IMAGE_END_V1__";
-    const query = `\u0005${"\u0000".repeat(5)}\u0006`;
+    const query = imageReceiverQuery(2);
     const data = Buffer.from("recovered from a partial start").toString("base64");
     assert.deepEqual(terminalInput(start.slice(0, 6)), { consume: true });
-    assert.deepEqual(terminalInput(query), { data: query });
+    assert.deepEqual(terminalInput(query), { data: imageReceiverQueryPrefix });
     assert.deepEqual(terminalInput(`${start}image/png\u001f${data}${end}`), { consume: true });
     assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), {
       action: "transform",
@@ -548,8 +562,8 @@ test("wraps terminal markers in tmux passthrough", async () => {
         },
       };
       events.get("session_start")({}, ctx);
-      const query = `\u0005${"\u0000".repeat(15)}\u0006`;
-      assert.deepEqual(terminalInput(query), { data: query });
+      const query = imageReceiverQuery(12);
+      assert.deepEqual(terminalInput(query), { data: imageReceiverQueryPrefix });
       events.get("agent_settled")();
       events.get("session_shutdown")({}, ctx);
 

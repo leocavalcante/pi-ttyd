@@ -6,24 +6,24 @@ import { runInNewContext } from "node:vm";
 const clientSource = await readFile(new URL("../client.js", import.meta.url), "utf8");
 const imageReceiverQueryStart = "\u0005";
 const imageReceiverQueryEnd = "\u0006";
-const imageReceiverQueryDelimiter = imageReceiverQueryStart;
 const imageReceiverQueryPrefixLength = 3;
+const imageReceiverQueryPrefix = "\u0000".repeat(imageReceiverQueryPrefixLength);
 
 const imageReceiverQueryId = (query) => {
-  assert.equal(query[0], imageReceiverQueryStart);
+  assert.equal(query.slice(0, imageReceiverQueryPrefixLength), imageReceiverQueryPrefix);
+  assert.equal(query[imageReceiverQueryPrefixLength], imageReceiverQueryStart);
   assert.equal(query.at(-1), imageReceiverQueryEnd);
-  const payload = query.slice(1, -1);
+  const payload = query.slice(imageReceiverQueryPrefixLength + 1, -1);
   assert.equal(payload, "\u0000".repeat(payload.length));
-  const queryId = String(payload.length - imageReceiverQueryPrefixLength);
+  const queryId = String(payload.length);
   assert.match(queryId, /^[1-9]\d{0,3}$/);
   assert.ok(Number(queryId) <= 4096);
   return queryId;
 };
 
-const answerImageReceiverQuery = (terminalInput, document, onMutation, state = "ready") => {
+const answerImageReceiverQuery = (terminalInput, emitTitle, state = "ready") => {
   const queryId = imageReceiverQueryId(terminalInput.at(-1).data);
-  document.title = `__PI_TTYD_IMAGE_RX__:${queryId}:${state} | ttyd`;
-  onMutation();
+  emitTitle(`__PI_TTYD_IMAGE_RX__:${queryId}:${state}`);
   return queryId;
 };
 
@@ -38,7 +38,7 @@ const createImageDropHarness = () => {
   const timeouts = new Map();
   const warnings = [];
   let nextTimeoutId = 0;
-  let onMutation;
+  let onTitleChange;
   let titleValue = "ttyd - Terminal";
   const titleElement = {};
   const document = {
@@ -56,26 +56,27 @@ const createImageDropHarness = () => {
       return id;
     },
     term: {
+      onTitleChange(callback) { onTitleChange = callback; },
       focus() {},
       input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
     },
   };
-  class MockMutationObserver {
-    constructor(callback) { onMutation = callback; }
-    observe() {}
-  }
 
   runInNewContext(clientSource, {
     document,
     window,
-    MutationObserver: MockMutationObserver,
     btoa,
     console: { warn: (...args) => warnings.push(args) },
   });
 
+  const emitTitle = (title) => {
+    document.title = title;
+    onTitleChange(title);
+  };
+
   return {
     document,
-    onMutation,
+    emitTitle,
     terminalInput,
     timeouts,
     warnings,
@@ -89,9 +90,9 @@ const createImageDropHarness = () => {
   };
 };
 
-test("sets explicit titles and restores them after a ready notification", () => {
+test("processes terminal title events and restores its custom title after a ready notification", () => {
   const notifications = [];
-  let onMutation;
+  let onTitleChange;
   let restoreTitle;
   const titleElement = {};
   let titleValue = "shell prompt | ttyd";
@@ -106,14 +107,14 @@ test("sets explicit titles and restores them after a ready notification", () => 
     querySelector: () => titleElement,
     addEventListener() {},
   };
-  class MockMutationObserver {
-    constructor(callback) { onMutation = callback; }
-    observe() {}
-  }
   class MockNotification {
     static permission = "granted";
     constructor(title, options) { notifications.push({ title, options }); }
   }
+  const emitTitle = (title) => {
+    document.title = title;
+    onTitleChange(title);
+  };
   const window = {
     Notification: MockNotification,
     clearTimeout() {},
@@ -121,39 +122,62 @@ test("sets explicit titles and restores them after a ready notification", () => 
       restoreTitle = callback;
       return 1;
     },
+    term: { onTitleChange(callback) { onTitleChange = callback; } },
   };
 
-  runInNewContext(clientSource, {
-    document,
-    window,
-    Notification: MockNotification,
-    MutationObserver: MockMutationObserver,
-  });
+  runInNewContext(clientSource, { document, window, Notification: MockNotification });
   assert.equal(document.title, "ttyd");
-  onMutation();
 
   const requestedTitle = "Checkout  staging | agent 2";
   const customTitle = "Checkout staging | agent 2";
-  document.title = `__PI_TTYD_TITLE__:${encodeURIComponent(requestedTitle)} | ttyd`;
-  onMutation();
+  emitTitle(`__PI_TTYD_TITLE__:${encodeURIComponent(requestedTitle)} | ttyd`);
   assert.equal(document.title, customTitle);
-  onMutation();
 
-  document.title = "shell prompt | ttyd";
-  onMutation();
+  emitTitle("shell prompt | ttyd");
   assert.equal(document.title, customTitle);
-  onMutation();
 
-  document.title = "__PI_TTYD__:123:456:1 | ttyd";
-  onMutation();
+  emitTitle("__PI_TTYD__:123:456:1 | ttyd");
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].title, "Pi");
   assert.equal(notifications[0].options.body, "Ready for input");
   assert.equal(document.title, `Pi ready | ${customTitle}`);
-  onMutation();
 
   restoreTitle();
   assert.equal(document.title, customTitle);
+});
+
+test("handles back-to-back receiver and ready title events in either order", async () => {
+  for (const order of [["receiver", "ready"], ["ready", "receiver"]]) {
+    const bytes = Uint8Array.of(1, 2, 3, 4);
+    let imageRead = false;
+    const harness = createImageDropHarness();
+    const dropPromise = harness.drop({
+      name: "back-to-back.png",
+      type: "image/png",
+      size: bytes.length,
+      arrayBuffer: async () => {
+        imageRead = true;
+        return bytes.buffer;
+      },
+    });
+    await Promise.resolve();
+    const queryId = imageReceiverQueryId(harness.terminalInput[0].data);
+
+    for (const event of order) {
+      if (event === "receiver") {
+        harness.emitTitle(`__PI_TTYD_IMAGE_RX__:${queryId}:ready`);
+      } else {
+        harness.emitTitle("__PI_TTYD__:1:2:3");
+      }
+    }
+
+    await flushUntil(() => imageRead && harness.terminalInput.length === 2);
+    const recheckQueryId = imageReceiverQueryId(harness.terminalInput.at(-1).data);
+    harness.emitTitle(`__PI_TTYD_IMAGE_RX__:${recheckQueryId}:ready`);
+    await dropPromise;
+    assert.equal(imageRead, true);
+    assert.equal(harness.document.title, "Pi ready | ttyd");
+  }
 });
 
 test("waits for a Pi receiver and serializes concurrent image drops", async () => {
@@ -162,7 +186,7 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   const timeouts = new Map();
   const warnings = [];
   let nextTimeoutId = 0;
-  let onMutation;
+  let onTitleChange;
   let focused = false;
   let firstReadStarted = false;
   let secondReadStarted = false;
@@ -188,14 +212,11 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
       return id;
     },
     term: {
+      onTitleChange(callback) { onTitleChange = callback; },
       focus() { focused = true; },
       input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
     },
   };
-  class MockMutationObserver {
-    constructor(callback) { onMutation = callback; }
-    observe() {}
-  }
   const firstBytes = Uint8Array.of(1, 2, 3, 4);
   const secondBytes = Uint8Array.of(5, 6, 7, 8);
   const firstFile = {
@@ -217,10 +238,13 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
     },
   };
 
+  const emitTitle = (title) => {
+    document.title = title;
+    onTitleChange(title);
+  };
   runInNewContext(clientSource, {
     document,
     window,
-    MutationObserver: MockMutationObserver,
     btoa,
     console: { warn: (...args) => warnings.push(args) },
   });
@@ -247,20 +271,20 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   assert.equal(firstReadStarted, false);
   assert.equal(secondReadStarted, false);
 
-  answerImageReceiverQuery(terminalInput, document, onMutation);
+  answerImageReceiverQuery(terminalInput, emitTitle);
   await Promise.resolve();
   assert.equal(firstReadStarted, true);
   assert.equal(secondReadStarted, false);
   resolveFirstRead(firstBytes.buffer);
-  await flushUntil(() => terminalInput.filter((entry) => entry.data.startsWith(imageReceiverQueryDelimiter)).length >= 2);
-  const firstSendQueryId = answerImageReceiverQuery(terminalInput, document, onMutation);
+  await flushUntil(() => terminalInput.filter((entry) => entry.data.startsWith(imageReceiverQueryPrefix)).length >= 2);
+  const firstSendQueryId = answerImageReceiverQuery(terminalInput, emitTitle);
   await firstDrop;
   assert.equal(secondReadStarted, false);
-  await flushUntil(() => terminalInput.filter((entry) => entry.data.startsWith(imageReceiverQueryDelimiter)).length >= 3);
+  await flushUntil(() => terminalInput.filter((entry) => entry.data.startsWith(imageReceiverQueryPrefix)).length >= 3);
 
-  const secondDropQueryId = answerImageReceiverQuery(terminalInput, document, onMutation);
-  await flushUntil(() => secondReadStarted && terminalInput.filter((entry) => entry.data.startsWith(imageReceiverQueryDelimiter)).length >= 4);
-  const secondSendQueryId = answerImageReceiverQuery(terminalInput, document, onMutation);
+  const secondDropQueryId = answerImageReceiverQuery(terminalInput, emitTitle);
+  await flushUntil(() => secondReadStarted && terminalInput.filter((entry) => entry.data.startsWith(imageReceiverQueryPrefix)).length >= 4);
+  const secondSendQueryId = answerImageReceiverQuery(terminalInput, emitTitle);
   assert.notEqual(firstSendQueryId, secondDropQueryId);
   assert.notEqual(secondDropQueryId, secondSendQueryId);
   await secondDrop;
@@ -273,7 +297,7 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   assert.ok(terminalInput.every((entry) => entry.wasUserInput));
   assert.equal(
     terminalInput
-      .filter((entry) => !entry.data.startsWith(imageReceiverQueryDelimiter))
+      .filter((entry) => !entry.data.startsWith(imageReceiverQueryPrefix))
       .map((entry) => entry.data)
       .join(""),
     `\u001e__PI_TTYD_IMAGE_V1__image/png\u001f${encodedFirst}__PI_TTYD_IMAGE_END_V1__` +
@@ -311,11 +335,7 @@ test("rechecks readiness after an unmarked Pi exit during an image read", async 
   const harness = createImageDropHarness();
   const dropPromise = harness.drop(file);
   await Promise.resolve();
-  const initialQueryId = answerImageReceiverQuery(
-    harness.terminalInput,
-    harness.document,
-    harness.onMutation,
-  );
+  const initialQueryId = answerImageReceiverQuery(harness.terminalInput, harness.emitTitle);
   await Promise.resolve();
   assert.equal(imageReadStarted, true);
 
@@ -328,7 +348,7 @@ test("rechecks readiness after an unmarked Pi exit during an image read", async 
   [...harness.timeouts.values()][0]();
   await dropPromise;
   assert.equal(harness.terminalInput.length, 2);
-  assert.ok(harness.terminalInput.every((entry) => entry.data.startsWith(imageReceiverQueryDelimiter)));
+  assert.ok(harness.terminalInput.every((entry) => entry.data.startsWith(imageReceiverQueryPrefix)));
 });
 
 test("ignores late readiness replies for earlier receiver queries", async () => {
@@ -355,8 +375,7 @@ test("ignores late readiness replies for earlier receiver queries", async () => 
   const secondQueryId = imageReceiverQueryId(harness.terminalInput.at(-1).data);
   assert.notEqual(secondQueryId, firstQueryId);
 
-  harness.document.title = `__PI_TTYD_IMAGE_RX__:${firstQueryId}:ready | ttyd`;
-  harness.onMutation();
+  harness.emitTitle(`__PI_TTYD_IMAGE_RX__:${firstQueryId}:ready`);
   await Promise.resolve();
   assert.equal(imageRead, false);
   assert.equal(harness.terminalInput.length, 2);
@@ -390,14 +409,11 @@ test("does not send dropped image data without an active Pi receiver", async () 
       return id;
     },
     term: {
+      onTitleChange() {},
       focus() {},
       input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
     },
   };
-  class MockMutationObserver {
-    constructor() {}
-    observe() {}
-  }
   const imageBytes = Uint8Array.of(1, 2, 3, 4);
   const file = {
     name: "sample.png",
@@ -412,7 +428,6 @@ test("does not send dropped image data without an active Pi receiver", async () 
   runInNewContext(clientSource, {
     document,
     window,
-    MutationObserver: MockMutationObserver,
     btoa,
     console: { warn: (...args) => warnings.push(args) },
   });

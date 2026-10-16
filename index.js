@@ -4,7 +4,7 @@ const DEFAULT_TITLE = "ttyd";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_TRANSFER_START = "\u001e__PI_TTYD_IMAGE_V1__";
 const IMAGE_TRANSFER_END = "__PI_TTYD_IMAGE_END_V1__";
-// Ctrl-E/Ctrl-F delimit a NUL-run query ID without adding printable shell input.
+// The NUL prefix identifies Ctrl-E as a consumable query opener; Ctrl-F closes the frame.
 const IMAGE_RECEIVER_QUERY_START = "\u0005";
 const IMAGE_RECEIVER_QUERY_END = "\u0006";
 const IMAGE_RECEIVER_QUERY_PREFIX_LENGTH = 3;
@@ -70,7 +70,8 @@ export default function register(pi) {
   let transferTimeout;
   let unmatchedStart = "";
   let unsubscribeTerminalInput;
-  let receiverEnabled = false;
+  let receiverContacted = false;
+  let pendingReceiverQueryPrefixLength = 0;
   let pendingReceiverQueryLength = 0;
   let receiverQueryFrameOpen = false;
 
@@ -85,12 +86,13 @@ export default function register(pi) {
   };
 
   const clearReceiverQueryFrame = () => {
+    pendingReceiverQueryPrefixLength = 0;
     pendingReceiverQueryLength = 0;
     receiverQueryFrameOpen = false;
   };
 
   const completeReceiverQuery = () => {
-    const queryId = pendingReceiverQueryLength - IMAGE_RECEIVER_QUERY_PREFIX_LENGTH;
+    const queryId = pendingReceiverQueryLength;
     clearReceiverQueryFrame();
     if (queryId < 1 || queryId > MAX_IMAGE_RECEIVER_QUERY_ID) return;
 
@@ -102,6 +104,7 @@ export default function register(pi) {
       incomingTransfer.payloadLength = 0;
       incomingTransfer.tail = "";
     }
+    receiverContacted = true;
     sendImageReceiverState(true, String(queryId));
   };
 
@@ -298,6 +301,7 @@ export default function register(pi) {
         character !== IMAGE_RECEIVER_QUERY_END
       ) {
         if (receiverQueryFrameOpen) clearReceiverQueryFrame();
+        else pendingReceiverQueryPrefixLength = 0;
         continue;
       }
 
@@ -306,21 +310,38 @@ export default function register(pi) {
         if (receiverQueryFrameOpen) {
           pendingReceiverQueryLength = Math.min(
             pendingReceiverQueryLength + 1,
-            IMAGE_RECEIVER_QUERY_PREFIX_LENGTH + MAX_IMAGE_RECEIVER_QUERY_ID + 1,
+            MAX_IMAGE_RECEIVER_QUERY_ID + 1,
           );
+        } else {
+          pendingReceiverQueryPrefixLength = Math.min(
+            pendingReceiverQueryPrefixLength + 1,
+            IMAGE_RECEIVER_QUERY_PREFIX_LENGTH,
+          );
+          passthrough.push(character);
         }
       } else if (character === IMAGE_RECEIVER_QUERY_START) {
-        receiverQueryFrameOpen = true;
-        pendingReceiverQueryLength = 0;
-      } else if (receiverQueryFrameOpen) {
-        if (pendingReceiverQueryLength > IMAGE_RECEIVER_QUERY_PREFIX_LENGTH) {
-          completeReceiverQuery();
+        if (
+          !receiverQueryFrameOpen &&
+          pendingReceiverQueryPrefixLength === IMAGE_RECEIVER_QUERY_PREFIX_LENGTH
+        ) {
+          pendingReceiverQueryPrefixLength = 0;
+          pendingReceiverQueryLength = 0;
+          receiverQueryFrameOpen = true;
         } else {
           clearReceiverQueryFrame();
+          passthrough.push(character);
         }
+      } else if (
+        receiverQueryFrameOpen &&
+        pendingReceiverQueryLength > 0 &&
+        pendingReceiverQueryLength <= MAX_IMAGE_RECEIVER_QUERY_ID
+      ) {
+        completeReceiverQuery();
+      } else {
+        clearReceiverQueryFrame();
+        passthrough.push(character);
       }
 
-      passthrough.push(character);
       modified = true;
       textStart = index + 1;
     }
@@ -352,10 +373,10 @@ export default function register(pi) {
 
   pi.on("session_start", (_event, ctx) => {
     clearReceiverQueryFrame();
-    if (receiverEnabled) sendImageReceiverState(false);
+    if (receiverContacted) sendImageReceiverState(false);
+    receiverContacted = false;
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
-    receiverEnabled = false;
     clearIncomingTransfer();
     unmatchedStart = "";
     pendingImages = [];
@@ -363,7 +384,6 @@ export default function register(pi) {
 
     if (ctx.mode === "tui") {
       unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => handleTerminalInput(data, ctx));
-      receiverEnabled = true;
     }
     if (notificationsEnabled) sendTitle(ctx, DEFAULT_TITLE);
   });
@@ -372,8 +392,8 @@ export default function register(pi) {
     clearReceiverQueryFrame();
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
-    if (receiverEnabled) sendImageReceiverState(false);
-    receiverEnabled = false;
+    if (receiverContacted) sendImageReceiverState(false);
+    receiverContacted = false;
     clearIncomingTransfer();
     unmatchedStart = "";
     pendingImages = [];

@@ -26,7 +26,7 @@
   ]);
   let currentTitle = "ttyd";
   let lastEventId = "";
-  let lastAppliedTitle;
+  let readyFlashTitle;
   let restoreTimer;
   let imageReceiverActive = false;
   let imageReceiverQuerySequence = Math.floor(Math.random() * imageReceiverQueryIdLimit);
@@ -100,8 +100,10 @@
 
     try {
       terminal.focus();
-      const queryIdBytes = "\u0000".repeat(imageReceiverQueryPrefixLength + Number(queryId));
-      terminal.input(`${imageReceiverQueryStart}${queryIdBytes}${imageReceiverQueryEnd}`, true);
+      const queryPrefix = "\u0000".repeat(imageReceiverQueryPrefixLength);
+      const queryIdBytes = "\u0000".repeat(Number(queryId));
+      const query = `${queryPrefix}${imageReceiverQueryStart}${queryIdBytes}${imageReceiverQueryEnd}`;
+      terminal.input(query, true);
     } catch {
       resolveImageReceiverRequest(queryId, false);
     }
@@ -189,17 +191,11 @@
 
   const setPageTitle = (title) => {
     if (document.title === title) return;
-    lastAppliedTitle = title;
     document.title = title;
   };
 
-  const handleTitleChange = () => {
-    const title = document.title;
-    if (title === lastAppliedTitle) {
-      lastAppliedTitle = undefined;
-      return;
-    }
-    lastAppliedTitle = undefined;
+  const handleTitleChange = (title) => {
+    if (typeof title !== "string") return;
 
     const receiverMatch = imageReceiverMarker.exec(title);
     if (receiverMatch) {
@@ -212,7 +208,7 @@
         imageReceiverActive = false;
         if (imageReceiverRequest) resolveImageReceiverRequest(imageReceiverRequest.id, false);
       }
-      setPageTitle(currentTitle);
+      setPageTitle(readyFlashTitle ?? currentTitle);
       return;
     }
 
@@ -223,6 +219,7 @@
       } catch {
         return;
       }
+      readyFlashTitle = undefined;
       window.clearTimeout(restoreTimer);
       setPageTitle(currentTitle);
       return;
@@ -243,23 +240,24 @@
       }
 
       const flashedTitle = `Pi ready | ${currentTitle}`;
+      readyFlashTitle = flashedTitle;
       setPageTitle(flashedTitle);
       window.clearTimeout(restoreTimer);
       restoreTimer = window.setTimeout(() => {
+        if (readyFlashTitle === flashedTitle) readyFlashTitle = undefined;
         if (document.title === flashedTitle) setPageTitle(currentTitle);
+        restoreTimer = undefined;
       }, 5000);
       return;
     }
 
-    if (title !== currentTitle) setPageTitle(currentTitle);
+    if (title !== currentTitle) {
+      readyFlashTitle = undefined;
+      window.clearTimeout(restoreTimer);
+      setPageTitle(currentTitle);
+    }
   };
 
-  const observer = new MutationObserver(handleTitleChange);
-  observer.observe(titleElement, {
-    childList: true,
-    characterData: true,
-    subtree: true,
-  });
+  window.term?.onTitleChange?.(handleTitleChange);
   setPageTitle(currentTitle);
-  window.__piTtydTitleObserver = observer;
 })();
