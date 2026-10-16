@@ -6,11 +6,16 @@ import { runInNewContext } from "node:vm";
 const clientSource = await readFile(new URL("../client.js", import.meta.url), "utf8");
 const imageReceiverQueryPrefix = "\u0000\u0000\u0000";
 
+const imageReceiverQueryId = (query) => {
+  assert.equal(query, "\u0000".repeat(query.length));
+  const queryId = String(query.length - imageReceiverQueryPrefix.length);
+  assert.match(queryId, /^[1-9]\d{0,3}$/);
+  assert.ok(Number(queryId) <= 4096);
+  return queryId;
+};
+
 const answerImageReceiverQuery = (terminalInput, document, onMutation, state = "ready") => {
-  const query = terminalInput.at(-1).data;
-  assert.equal(query.slice(0, imageReceiverQueryPrefix.length), imageReceiverQueryPrefix);
-  const queryId = query.slice(imageReceiverQueryPrefix.length);
-  assert.match(queryId, /^[a-z0-9]{12}$/);
+  const queryId = imageReceiverQueryId(terminalInput.at(-1).data);
   document.title = `__PI_TTYD_IMAGE_RX__:${queryId}:${state} | ttyd`;
   onMutation();
   return queryId;
@@ -232,9 +237,7 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   await Promise.resolve();
 
   assert.equal(terminalInput.length, 1);
-  assert.equal(terminalInput[0].data.slice(0, imageReceiverQueryPrefix.length), imageReceiverQueryPrefix);
-  const initialQueryId = terminalInput[0].data.slice(imageReceiverQueryPrefix.length);
-  assert.match(initialQueryId, /^[a-z0-9]{12}$/);
+  const initialQueryId = imageReceiverQueryId(terminalInput[0].data);
   assert.equal(firstReadStarted, false);
   assert.equal(secondReadStarted, false);
 
@@ -312,9 +315,8 @@ test("rechecks readiness after an unmarked Pi exit during an image read", async 
 
   resolveRead(bytes.buffer);
   await flushUntil(() => harness.terminalInput.length === 2);
-  const finalQuery = harness.terminalInput.at(-1).data;
-  assert.equal(finalQuery.slice(0, imageReceiverQueryPrefix.length), imageReceiverQueryPrefix);
-  assert.notEqual(finalQuery.slice(imageReceiverQueryPrefix.length), initialQueryId);
+  const finalQueryId = imageReceiverQueryId(harness.terminalInput.at(-1).data);
+  assert.notEqual(finalQueryId, initialQueryId);
   assert.equal(harness.timeouts.size, 1);
 
   [...harness.timeouts.values()][0]();
@@ -338,13 +340,13 @@ test("ignores late readiness replies for earlier receiver queries", async () => 
   const harness = createImageDropHarness();
   const firstDrop = harness.drop(file);
   await Promise.resolve();
-  const firstQueryId = harness.terminalInput[0].data.slice(imageReceiverQueryPrefix.length);
+  const firstQueryId = imageReceiverQueryId(harness.terminalInput[0].data);
   [...harness.timeouts.values()][0]();
   await firstDrop;
 
   const secondDrop = harness.drop(file);
   await flushUntil(() => harness.terminalInput.length === 2);
-  const secondQueryId = harness.terminalInput.at(-1).data.slice(imageReceiverQueryPrefix.length);
+  const secondQueryId = imageReceiverQueryId(harness.terminalInput.at(-1).data);
   assert.notEqual(secondQueryId, firstQueryId);
 
   harness.document.title = `__PI_TTYD_IMAGE_RX__:${firstQueryId}:ready | ttyd`;
@@ -416,8 +418,7 @@ test("does not send dropped image data without an active Pi receiver", async () 
   });
   await Promise.resolve();
   assert.equal(terminalInput.length, 1);
-  assert.equal(terminalInput[0].data.slice(0, imageReceiverQueryPrefix.length), imageReceiverQueryPrefix);
-  assert.match(terminalInput[0].data.slice(imageReceiverQueryPrefix.length), /^[a-z0-9]{12}$/);
+  imageReceiverQueryId(terminalInput[0].data);
   assert.equal(imageRead, false);
 
   const timeout = [...timeouts.values()][0];

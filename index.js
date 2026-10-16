@@ -4,8 +4,10 @@ const DEFAULT_TITLE = "ttyd";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_TRANSFER_START = "\u001e__PI_TTYD_IMAGE_V1__";
 const IMAGE_TRANSFER_END = "__PI_TTYD_IMAGE_END_V1__";
-const IMAGE_RECEIVER_QUERY = "\u0000\u0000\u0000";
-const IMAGE_RECEIVER_QUERY_ID_LENGTH = 12;
+// A NUL-run encodes query IDs without leaving printable probe text in a shell.
+const IMAGE_RECEIVER_QUERY_PREFIX_LENGTH = 3;
+const MAX_IMAGE_RECEIVER_QUERY_ID = 4096;
+const IMAGE_RECEIVER_QUERY_IDLE_MS = 25;
 const IMAGE_RECEIVER_MARKER = "__PI_TTYD_IMAGE_RX__:";
 const IMAGE_PAYLOAD_SEPARATOR = "\u001f";
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -68,6 +70,8 @@ export default function register(pi) {
   let unmatchedStart = "";
   let unsubscribeTerminalInput;
   let receiverEnabled = false;
+  let pendingReceiverQueryLength = 0;
+  let receiverQueryTimeout;
 
   const clearTransferTimeout = () => {
     if (transferTimeout !== undefined) clearTimeout(transferTimeout);
@@ -77,6 +81,36 @@ export default function register(pi) {
   const clearIncomingTransfer = () => {
     clearTransferTimeout();
     incomingTransfer = undefined;
+  };
+
+  const clearReceiverQuery = () => {
+    if (receiverQueryTimeout !== undefined) clearTimeout(receiverQueryTimeout);
+    receiverQueryTimeout = undefined;
+    pendingReceiverQueryLength = 0;
+  };
+
+  const completeReceiverQuery = () => {
+    const queryId = pendingReceiverQueryLength - IMAGE_RECEIVER_QUERY_PREFIX_LENGTH;
+    clearReceiverQuery();
+    if (queryId < 1 || queryId > MAX_IMAGE_RECEIVER_QUERY_ID) return;
+
+    if (incomingTransfer) {
+      clearTransferTimeout();
+      incomingTransfer.discarding = true;
+      incomingTransfer.payloadBuffer = undefined;
+      incomingTransfer.payloadLength = 0;
+      incomingTransfer.tail = "";
+    }
+    sendImageReceiverState(true, String(queryId));
+  };
+
+  const armReceiverQueryTimeout = () => {
+    if (receiverQueryTimeout !== undefined) clearTimeout(receiverQueryTimeout);
+    receiverQueryTimeout = setTimeout(() => {
+      receiverQueryTimeout = undefined;
+      completeReceiverQuery();
+    }, IMAGE_RECEIVER_QUERY_IDLE_MS);
+    receiverQueryTimeout.unref?.();
   };
 
   const scheduleTransferTimeout = (ctx, transfer, delay) => {
@@ -142,34 +176,12 @@ export default function register(pi) {
     return 0;
   };
 
-  const trailingQueryPrefixLength = (text) => {
-    const markerPrefixLength = trailingMarkerPrefixLength(text, IMAGE_RECEIVER_QUERY);
-    if (markerPrefixLength > 0) return markerPrefixLength;
-
-    const markerIndex = text.lastIndexOf(IMAGE_RECEIVER_QUERY);
-    if (markerIndex < 0) return 0;
-    const idPart = text.slice(markerIndex + IMAGE_RECEIVER_QUERY.length);
-    if (idPart.length >= IMAGE_RECEIVER_QUERY_ID_LENGTH || !/^[a-z0-9]*$/.test(idPart)) return 0;
-    return text.length - markerIndex;
-  };
-
-  const readImageReceiverQueryId = (text, markerIndex) => {
-    const idStart = markerIndex + IMAGE_RECEIVER_QUERY.length;
-    const idEnd = idStart + IMAGE_RECEIVER_QUERY_ID_LENGTH;
-    if (idEnd > text.length) return undefined;
-    const queryId = text.slice(idStart, idEnd);
-    return /^[a-z0-9]{12}$/.test(queryId) ? queryId : undefined;
-  };
-
-  const trailingStartPrefixLength = (text) => Math.max(
-    trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START),
-    trailingQueryPrefixLength(text),
-  );
+  const trailingStartPrefixLength = (text) =>
+    trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START);
 
   const trailingTransferMarkerLength = (text) => Math.max(
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START),
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_END),
-    trailingQueryPrefixLength(text),
   );
 
   const appendTransferPayload = (transfer, body) => {
@@ -193,7 +205,7 @@ export default function register(pi) {
     }
   };
 
-  const handleTerminalInput = (data, ctx) => {
+  const handleTerminalText = (data, ctx) => {
     if (!data) return;
 
     let modified = Boolean(incomingTransfer || unmatchedStart);
@@ -203,11 +215,7 @@ export default function register(pi) {
         const combined = unmatchedStart + data;
         unmatchedStart = "";
         const startIndex = combined.indexOf(IMAGE_TRANSFER_START);
-        const queryIndex = combined.indexOf(IMAGE_RECEIVER_QUERY);
-        const markerIndex = startIndex < 0
-          ? queryIndex
-          : queryIndex < 0 ? startIndex : Math.min(startIndex, queryIndex);
-        if (markerIndex < 0) {
+        if (startIndex < 0) {
           const partialLength = trailingStartPrefixLength(combined);
           if (partialLength === 0 && !modified) return;
           passthrough.push(combined.slice(0, combined.length - partialLength));
@@ -216,26 +224,7 @@ export default function register(pi) {
         }
 
         modified = true;
-        passthrough.push(combined.slice(0, markerIndex));
-        if (queryIndex === markerIndex) {
-          const queryId = readImageReceiverQueryId(combined, queryIndex);
-          if (queryId) {
-            sendImageReceiverState(true, queryId);
-            data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length + IMAGE_RECEIVER_QUERY_ID_LENGTH);
-            continue;
-          }
-
-          const partialLength = trailingQueryPrefixLength(combined);
-          if (partialLength > 0 && queryIndex === combined.length - partialLength) {
-            unmatchedStart = combined.slice(queryIndex);
-            break;
-          }
-
-          passthrough.push(combined.slice(queryIndex, queryIndex + IMAGE_RECEIVER_QUERY.length));
-          data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length);
-          continue;
-        }
-
+        passthrough.push(combined.slice(0, startIndex));
         data = combined.slice(startIndex + IMAGE_TRANSFER_START.length);
         incomingTransfer = {
           payloadBuffer: Buffer.alloc(MAX_IMAGE_PAYLOAD_CHARS),
@@ -251,20 +240,7 @@ export default function register(pi) {
       armTransferTimeout(ctx);
       const transfer = incomingTransfer;
       const combined = transfer.tail + data;
-      const queryIndex = combined.indexOf(IMAGE_RECEIVER_QUERY);
       const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
-      const queryId = queryIndex < 0 ? undefined : readImageReceiverQueryId(combined, queryIndex);
-      if (queryId && (endIndex < 0 || queryIndex < endIndex)) {
-        clearTransferTimeout();
-        transfer.discarding = true;
-        transfer.payloadBuffer = undefined;
-        transfer.payloadLength = 0;
-        sendImageReceiverState(true, queryId);
-        data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length + IMAGE_RECEIVER_QUERY_ID_LENGTH);
-        modified = true;
-        continue;
-      }
-
       const startIndex = transfer.discarding ? combined.indexOf(IMAGE_TRANSFER_START) : -1;
       if (startIndex >= 0 && (endIndex < 0 || startIndex < endIndex)) {
         clearIncomingTransfer();
@@ -303,6 +279,70 @@ export default function register(pi) {
     return text ? { data: text } : { consume: true };
   };
 
+  const handleTerminalInput = (data, ctx) => {
+    if (!data) return;
+
+    let modified = false;
+    const passthrough = [];
+    const processText = (text) => {
+      if (!text) return;
+      const result = handleTerminalText(text, ctx);
+      if (result?.data) {
+        modified = true;
+        passthrough.push(result.data);
+      } else if (result?.consume) {
+        modified = true;
+      } else {
+        passthrough.push(text);
+      }
+    };
+
+    let index = 0;
+    if (pendingReceiverQueryLength > 0) {
+      modified = true;
+      while (index < data.length && data.charCodeAt(index) === 0) {
+        pendingReceiverQueryLength = Math.min(
+          pendingReceiverQueryLength + 1,
+          IMAGE_RECEIVER_QUERY_PREFIX_LENGTH + MAX_IMAGE_RECEIVER_QUERY_ID + 1,
+        );
+        index++;
+      }
+      if (index === data.length) {
+        armReceiverQueryTimeout();
+        return { consume: true };
+      }
+      completeReceiverQuery();
+    }
+
+    while (index < data.length) {
+      const queryStart = data.indexOf("\u0000", index);
+      if (queryStart < 0) {
+        processText(data.slice(index));
+        break;
+      }
+
+      modified = true;
+      processText(data.slice(index, queryStart));
+      let queryEnd = queryStart;
+      while (queryEnd < data.length && data.charCodeAt(queryEnd) === 0) queryEnd++;
+      pendingReceiverQueryLength = Math.min(
+        queryEnd - queryStart,
+        IMAGE_RECEIVER_QUERY_PREFIX_LENGTH + MAX_IMAGE_RECEIVER_QUERY_ID + 1,
+      );
+      if (queryEnd === data.length) {
+        armReceiverQueryTimeout();
+        break;
+      }
+
+      completeReceiverQuery();
+      index = queryEnd;
+    }
+
+    if (!modified) return;
+    const text = passthrough.join("");
+    return text ? { data: text } : { consume: true };
+  };
+
   if (notificationsEnabled) {
     pi.registerCommand("ttyd-title", {
       description: "Set the ttyd tab title; omit the title to reset it",
@@ -323,6 +363,7 @@ export default function register(pi) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    clearReceiverQuery();
     if (receiverEnabled) sendImageReceiverState(false);
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
@@ -340,6 +381,7 @@ export default function register(pi) {
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    clearReceiverQuery();
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
     if (receiverEnabled) sendImageReceiverState(false);

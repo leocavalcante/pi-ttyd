@@ -4,7 +4,7 @@
 
   const readyMarker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+.*)?$/;
   const titleMarker = /^__PI_TTYD_TITLE__:([^\s]*)(?:\s+\|\s+.*)?$/;
-  const imageReceiverMarker = /^__PI_TTYD_IMAGE_RX__:(?:([a-z0-9]{12}):)?(ready|inactive)(?:\s+\|\s+.*)?$/;
+  const imageReceiverMarker = /^__PI_TTYD_IMAGE_RX__:(?:([1-9]\d{0,3}):)?(ready|inactive)(?:\s+\|\s+.*)?$/;
   const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
   const imageTransferStart = "\u001e__PI_TTYD_IMAGE_V1__";
   const imageTransferEnd = "__PI_TTYD_IMAGE_END_V1__";
@@ -13,6 +13,7 @@
   const maxImageBytes = 4 * 1024 * 1024;
   const chunkSize = 48 * 1024;
   const imageReceiverTimeoutMs = 2000;
+  const imageReceiverQueryIdLimit = 4096;
   const imageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
   const extensionTypes = new Map([
     ["png", "image/png"],
@@ -26,8 +27,7 @@
   let lastAppliedTitle;
   let restoreTimer;
   let imageReceiverActive = false;
-  const imageReceiverQueryIdPrefix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-  let imageReceiverQuerySequence = 0;
+  let imageReceiverQuerySequence = Math.floor(Math.random() * imageReceiverQueryIdLimit);
   let imageReceiverRequest;
   let imageReceiverRequestTimer;
   let imageDropQueue = Promise.resolve();
@@ -64,8 +64,10 @@
     return btoa(binary);
   };
 
-  const nextImageReceiverQueryId = () =>
-    `${imageReceiverQueryIdPrefix}${(++imageReceiverQuerySequence).toString(36).padStart(6, "0")}`;
+  const nextImageReceiverQueryId = () => {
+    imageReceiverQuerySequence = (imageReceiverQuerySequence % imageReceiverQueryIdLimit) + 1;
+    return String(imageReceiverQuerySequence);
+  };
 
   const resolveImageReceiverRequest = (queryId, active) => {
     const request = imageReceiverRequest;
@@ -96,7 +98,7 @@
 
     try {
       terminal.focus();
-      terminal.input(`${imageReceiverQuery}${queryId}`, true);
+      terminal.input("\u0000".repeat(imageReceiverQuery.length + Number(queryId)), true);
     } catch {
       resolveImageReceiverRequest(queryId, false);
     }

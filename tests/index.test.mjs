@@ -110,30 +110,133 @@ test("answers receiver queries and invalidates the capability on shutdown", asyn
     },
   };
   const originalWrite = process.stdout.write;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
   const output = [];
+  let receiverQueryTimer;
   process.stdout.write = (chunk) => {
     output.push(String(chunk));
     return true;
   };
+  globalThis.setTimeout = (callback) => {
+    receiverQueryTimer = callback;
+    return { unref() {} };
+  };
+  globalThis.clearTimeout = () => { receiverQueryTimer = undefined; };
 
   try {
     await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
       handlers.get("session_start")({}, ctx);
-      const query = "\u0000\u0000\u00000123456789ab";
-      assert.deepEqual(terminalInput(`typed ${query.slice(0, 7)}`), { data: "typed " });
+      const query = "\u0000".repeat(15);
+      assert.deepEqual(terminalInput(`typed ${query.slice(0, 3)}`), { data: "typed " });
       assert.deepEqual(output, []);
-      assert.deepEqual(terminalInput(query.slice(7)), { consume: true });
-      assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:0123456789ab:ready\x07"]);
+      assert.deepEqual(terminalInput(query.slice(3)), { consume: true });
+      assert.deepEqual(output, []);
+      assert.ok(receiverQueryTimer);
+      receiverQueryTimer();
+      assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:12:ready\x07"]);
 
       handlers.get("session_shutdown")({}, ctx);
       assert.deepEqual(output, [
-        "\x1b]2;__PI_TTYD_IMAGE_RX__:0123456789ab:ready\x07",
+        "\x1b]2;__PI_TTYD_IMAGE_RX__:12:ready\x07",
         "\x1b]2;__PI_TTYD_IMAGE_RX__:inactive\x07",
       ]);
       assert.equal(terminalInput, undefined);
     });
   } finally {
     process.stdout.write = originalWrite;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
+test("resynchronizes after a split receiver query interrupts an image transfer", () => {
+  const handlers = new Map();
+  const output = [];
+  let terminalInput;
+  const originalWrite = process.stdout.write;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalNotify = process.env.PI_TTYD_NOTIFY;
+  const originalTmux = process.env.TMUX;
+  let queryTimer;
+  let queryTimerId;
+  delete process.env.PI_TTYD_NOTIFY;
+  delete process.env.TMUX;
+  process.stdout.write = (chunk) => {
+    output.push(String(chunk));
+    return true;
+  };
+  globalThis.setTimeout = (callback, delay) => {
+    if (delay !== 25) return originalSetTimeout(callback, delay);
+    queryTimer = callback;
+    queryTimerId = { unref() {} };
+    return queryTimerId;
+  };
+  globalThis.clearTimeout = (timerId) => {
+    if (timerId === queryTimerId) {
+      queryTimer = undefined;
+      queryTimerId = undefined;
+    } else {
+      originalClearTimeout(timerId);
+    }
+  };
+  const flushReceiverQuery = () => {
+    assert.ok(queryTimer);
+    const callback = queryTimer;
+    queryTimer = undefined;
+    queryTimerId = undefined;
+    callback();
+  };
+
+  try {
+    register({ on: (event, handler) => handlers.set(event, handler) });
+    const ctx = {
+      mode: "tui",
+      ui: {
+        onTerminalInput: (handler) => { terminalInput = handler; return () => {}; },
+        setStatus() {},
+        notify() {},
+      },
+    };
+    handlers.get("session_start")({}, ctx);
+
+    const start = "\u001e__PI_TTYD_IMAGE_V1__";
+    const end = "__PI_TTYD_IMAGE_END_V1__";
+    const partialData = Buffer.from("interrupted image").toString("base64");
+    assert.deepEqual(terminalInput(`${start}image/png\u001f${partialData}${end.slice(0, 6)}`), { consume: true });
+    const firstQuery = "\u0000".repeat(5);
+    assert.deepEqual(terminalInput(firstQuery.slice(0, 3)), { consume: true });
+    assert.deepEqual(terminalInput(firstQuery.slice(3)), { consume: true });
+    flushReceiverQuery();
+    assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:2:ready\x07"]);
+
+    assert.deepEqual(terminalInput("\u0000".repeat(6)), { consume: true });
+    flushReceiverQuery();
+    assert.deepEqual(output, [
+      "\x1b]2;__PI_TTYD_IMAGE_RX__:2:ready\x07",
+      "\x1b]2;__PI_TTYD_IMAGE_RX__:3:ready\x07",
+    ]);
+
+    const recoveredData = Buffer.from("recovered image").toString("base64");
+    assert.deepEqual(
+      terminalInput(`${start}image/jpeg\u001f${recoveredData}${end}`),
+      { consume: true },
+    );
+    assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), {
+      action: "transform",
+      text: "Describe it",
+      images: [{ type: "image", mimeType: "image/jpeg", data: recoveredData }],
+    });
+    handlers.get("session_shutdown")({}, ctx);
+  } finally {
+    process.stdout.write = originalWrite;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+    if (originalNotify === undefined) delete process.env.PI_TTYD_NOTIFY;
+    else process.env.PI_TTYD_NOTIFY = originalNotify;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
   }
 });
 
@@ -365,11 +468,19 @@ test("wraps terminal markers in tmux passthrough", async () => {
     const events = new Map();
     let terminalInput;
     const originalWrite = process.stdout.write;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
     const output = [];
+    let receiverQueryTimer;
     process.stdout.write = (chunk) => {
       output.push(String(chunk));
       return true;
     };
+    globalThis.setTimeout = (callback) => {
+      receiverQueryTimer = callback;
+      return { unref() {} };
+    };
+    globalThis.clearTimeout = () => { receiverQueryTimer = undefined; };
 
     try {
       register({
@@ -386,15 +497,19 @@ test("wraps terminal markers in tmux passthrough", async () => {
         },
       };
       events.get("session_start")({}, ctx);
-      assert.deepEqual(terminalInput("\u0000\u0000\u00000123456789ab"), { consume: true });
+      assert.deepEqual(terminalInput("\u0000".repeat(15)), { consume: true });
+      assert.ok(receiverQueryTimer);
+      receiverQueryTimer();
       events.get("agent_settled")();
       events.get("session_shutdown")({}, ctx);
 
-      assert.match(output[0], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD_IMAGE_RX__:0123456789ab:ready\x07\x1b\\$/);
+      assert.match(output[0], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD_IMAGE_RX__:12:ready\x07\x1b\\$/);
       assert.match(output[1], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD__:\d+:\d+:\d+\x07\x1b\\$/);
       assert.match(output[2], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD_IMAGE_RX__:inactive\x07\x1b\\$/);
     } finally {
       process.stdout.write = originalWrite;
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
     }
   });
 });
