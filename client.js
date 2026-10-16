@@ -4,6 +4,7 @@
 
   const readyMarker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+.*)?$/;
   const titleMarker = /^__PI_TTYD_TITLE__:([^\s]*)(?:\s+\|\s+.*)?$/;
+  const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
   let currentTitle = "ttyd";
   let lastEventId = "";
   let lastAppliedTitle;
@@ -26,7 +27,7 @@
     const titleMatch = titleMarker.exec(title);
     if (titleMatch) {
       try {
-        currentTitle = decodeURIComponent(titleMatch[1]) || "ttyd";
+        currentTitle = normalizeTitle(decodeURIComponent(titleMatch[1])) || "ttyd";
       } catch {
         return;
       }

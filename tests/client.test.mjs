@@ -10,9 +10,15 @@ test("sets explicit titles and restores them after a ready notification", () => 
   let onMutation;
   let restoreTitle;
   const titleElement = {};
+  let titleValue = "shell prompt | ttyd";
   const document = {
     hidden: true,
-    title: "shell prompt | ttyd",
+    get title() {
+      return titleValue.replace(/[ \t\n\f\r]+/g, " ").trim();
+    },
+    set title(title) {
+      titleValue = title;
+    },
     querySelector: () => titleElement,
   };
   class MockMutationObserver {
@@ -41,8 +47,9 @@ test("sets explicit titles and restores them after a ready notification", () => 
   assert.equal(document.title, "ttyd");
   onMutation();
 
-  const customTitle = "Checkout — staging | agent 2";
-  document.title = `__PI_TTYD_TITLE__:${encodeURIComponent(customTitle)} | ttyd`;
+  const requestedTitle = "Checkout  staging | agent 2";
+  const customTitle = "Checkout staging | agent 2";
+  document.title = `__PI_TTYD_TITLE__:${encodeURIComponent(requestedTitle)} | ttyd`;
   onMutation();
   assert.equal(document.title, customTitle);
   onMutation();
