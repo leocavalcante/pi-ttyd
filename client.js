@@ -8,7 +8,9 @@
   const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
   const imageTransferStart = "\u001e__PI_TTYD_IMAGE_V1__";
   const imageTransferEnd = "__PI_TTYD_IMAGE_END_V1__";
-  const imageReceiverQuery = "\u0000\u0000\u0000";
+  const imageReceiverQueryStart = "\u0005";
+  const imageReceiverQueryEnd = "\u0006";
+  const imageReceiverQueryPrefixLength = 3;
   const imagePayloadSeparator = "\u001f";
   const maxImageBytes = 4 * 1024 * 1024;
   const chunkSize = 48 * 1024;
@@ -98,7 +100,8 @@
 
     try {
       terminal.focus();
-      terminal.input("\u0000".repeat(imageReceiverQuery.length + Number(queryId)), true);
+      const queryIdBytes = "\u0000".repeat(imageReceiverQueryPrefixLength + Number(queryId));
+      terminal.input(`${imageReceiverQueryStart}${queryIdBytes}${imageReceiverQueryEnd}`, true);
     } catch {
       resolveImageReceiverRequest(queryId, false);
     }

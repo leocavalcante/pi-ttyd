@@ -4,10 +4,11 @@ const DEFAULT_TITLE = "ttyd";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_TRANSFER_START = "\u001e__PI_TTYD_IMAGE_V1__";
 const IMAGE_TRANSFER_END = "__PI_TTYD_IMAGE_END_V1__";
-// A NUL-run encodes query IDs without leaving printable probe text in a shell.
+// Ctrl-E/Ctrl-F delimit a NUL-run query ID without adding printable shell input.
+const IMAGE_RECEIVER_QUERY_START = "\u0005";
+const IMAGE_RECEIVER_QUERY_END = "\u0006";
 const IMAGE_RECEIVER_QUERY_PREFIX_LENGTH = 3;
 const MAX_IMAGE_RECEIVER_QUERY_ID = 4096;
-const IMAGE_RECEIVER_QUERY_IDLE_MS = 25;
 const IMAGE_RECEIVER_MARKER = "__PI_TTYD_IMAGE_RX__:";
 const IMAGE_PAYLOAD_SEPARATOR = "\u001f";
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -71,7 +72,7 @@ export default function register(pi) {
   let unsubscribeTerminalInput;
   let receiverEnabled = false;
   let pendingReceiverQueryLength = 0;
-  let receiverQueryTimeout;
+  let receiverQueryFrameOpen = false;
 
   const clearTransferTimeout = () => {
     if (transferTimeout !== undefined) clearTimeout(transferTimeout);
@@ -83,17 +84,17 @@ export default function register(pi) {
     incomingTransfer = undefined;
   };
 
-  const clearReceiverQuery = () => {
-    if (receiverQueryTimeout !== undefined) clearTimeout(receiverQueryTimeout);
-    receiverQueryTimeout = undefined;
+  const clearReceiverQueryFrame = () => {
     pendingReceiverQueryLength = 0;
+    receiverQueryFrameOpen = false;
   };
 
   const completeReceiverQuery = () => {
     const queryId = pendingReceiverQueryLength - IMAGE_RECEIVER_QUERY_PREFIX_LENGTH;
-    clearReceiverQuery();
+    clearReceiverQueryFrame();
     if (queryId < 1 || queryId > MAX_IMAGE_RECEIVER_QUERY_ID) return;
 
+    unmatchedStart = "";
     if (incomingTransfer) {
       clearTransferTimeout();
       incomingTransfer.discarding = true;
@@ -102,15 +103,6 @@ export default function register(pi) {
       incomingTransfer.tail = "";
     }
     sendImageReceiverState(true, String(queryId));
-  };
-
-  const armReceiverQueryTimeout = () => {
-    if (receiverQueryTimeout !== undefined) clearTimeout(receiverQueryTimeout);
-    receiverQueryTimeout = setTimeout(() => {
-      receiverQueryTimeout = undefined;
-      completeReceiverQuery();
-    }, IMAGE_RECEIVER_QUERY_IDLE_MS);
-    receiverQueryTimeout.unref?.();
   };
 
   const scheduleTransferTimeout = (ctx, transfer, delay) => {
@@ -297,47 +289,43 @@ export default function register(pi) {
       }
     };
 
-    let index = 0;
-    if (pendingReceiverQueryLength > 0) {
+    let textStart = 0;
+    for (let index = 0; index < data.length; index++) {
+      const character = data[index];
+      if (
+        character !== "\u0000" &&
+        character !== IMAGE_RECEIVER_QUERY_START &&
+        character !== IMAGE_RECEIVER_QUERY_END
+      ) {
+        if (receiverQueryFrameOpen) clearReceiverQueryFrame();
+        continue;
+      }
+
+      processText(data.slice(textStart, index));
+      if (character === "\u0000") {
+        if (receiverQueryFrameOpen) {
+          pendingReceiverQueryLength = Math.min(
+            pendingReceiverQueryLength + 1,
+            IMAGE_RECEIVER_QUERY_PREFIX_LENGTH + MAX_IMAGE_RECEIVER_QUERY_ID + 1,
+          );
+        }
+      } else if (character === IMAGE_RECEIVER_QUERY_START) {
+        receiverQueryFrameOpen = true;
+        pendingReceiverQueryLength = 0;
+      } else if (receiverQueryFrameOpen) {
+        if (pendingReceiverQueryLength > IMAGE_RECEIVER_QUERY_PREFIX_LENGTH) {
+          completeReceiverQuery();
+        } else {
+          clearReceiverQueryFrame();
+        }
+      }
+
+      passthrough.push(character);
       modified = true;
-      while (index < data.length && data.charCodeAt(index) === 0) {
-        pendingReceiverQueryLength = Math.min(
-          pendingReceiverQueryLength + 1,
-          IMAGE_RECEIVER_QUERY_PREFIX_LENGTH + MAX_IMAGE_RECEIVER_QUERY_ID + 1,
-        );
-        index++;
-      }
-      if (index === data.length) {
-        armReceiverQueryTimeout();
-        return { consume: true };
-      }
-      completeReceiverQuery();
+      textStart = index + 1;
     }
 
-    while (index < data.length) {
-      const queryStart = data.indexOf("\u0000", index);
-      if (queryStart < 0) {
-        processText(data.slice(index));
-        break;
-      }
-
-      modified = true;
-      processText(data.slice(index, queryStart));
-      let queryEnd = queryStart;
-      while (queryEnd < data.length && data.charCodeAt(queryEnd) === 0) queryEnd++;
-      pendingReceiverQueryLength = Math.min(
-        queryEnd - queryStart,
-        IMAGE_RECEIVER_QUERY_PREFIX_LENGTH + MAX_IMAGE_RECEIVER_QUERY_ID + 1,
-      );
-      if (queryEnd === data.length) {
-        armReceiverQueryTimeout();
-        break;
-      }
-
-      completeReceiverQuery();
-      index = queryEnd;
-    }
-
+    processText(data.slice(textStart));
     if (!modified) return;
     const text = passthrough.join("");
     return text ? { data: text } : { consume: true };
@@ -363,7 +351,7 @@ export default function register(pi) {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    clearReceiverQuery();
+    clearReceiverQueryFrame();
     if (receiverEnabled) sendImageReceiverState(false);
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
@@ -381,7 +369,7 @@ export default function register(pi) {
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
-    clearReceiverQuery();
+    clearReceiverQueryFrame();
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
     if (receiverEnabled) sendImageReceiverState(false);
