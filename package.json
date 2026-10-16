@@ -1,7 +1,7 @@
 {
   "name": "pi-ttyd",
-  "version": "0.1.0",
-  "description": "Browser notifications when Pi is ready for input in ttyd.",
+  "version": "0.2.0",
+  "description": "Set the ttyd browser tab title and notify when Pi is ready.",
   "type": "module",
   "license": "MIT",
   "repository": {

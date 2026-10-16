@@ -1,14 +1,16 @@
 # pi-ttyd
 
-A small Pi extension and ttyd client script that notify you when Pi has settled
-and is waiting for input.
+A small Pi extension and ttyd client script that set the browser tab title and
+notify you when Pi has settled and is waiting for input.
 
-The extension sends a private terminal-title marker only when
-`PI_TTYD_NOTIFY=1`. The ttyd browser client observes that title change, briefly
-marks the tab as `Pi ready`, and shows a browser notification if the tab is
-hidden and notification permission is granted. The marker contains no prompt,
-response, or session text. Settlement means Pi is waiting for input; it does not
-mean the task succeeded.
+With `PI_TTYD_NOTIFY=1`, the extension resets the tab title to `ttyd` when a Pi
+session starts and registers `/ttyd-title <title>` to set a custom title. Run
+`/ttyd-title` with no argument to restore `ttyd`. When Pi settles, it sends a
+separate private terminal-title marker; the ttyd browser client briefly marks
+the tab as `Pi ready` and shows a browser notification if the tab is hidden and
+notification permission is granted. Markers contain no prompt, response, or
+session text. Settlement means Pi is waiting for input; it does not mean the
+task succeeded.
 
 ## Install
 
@@ -29,12 +31,13 @@ For a shell function that runs `command ttyd`, prefix that command with
 
 ## Configure ttyd's browser page
 
-The extension uses the terminal-title update already handled by ttyd's xterm
-client. Add the contents of [`client.js`](client.js) in a separate `<script>`
-tag after ttyd's bundled application script and before `</body>` in the custom
-HTML passed with `ttyd --index`. Do not replace or edit ttyd's application
-bundle. The page must allow terminal title updates; avoid ttyd's fixed-title
-option if you use one.
+The extension uses terminal-title updates handled by ttyd's xterm client. Add
+the contents of [`client.js`](client.js) in a separate `<script>` tag after
+ttyd's bundled application script and before `</body>` in the custom HTML passed
+with `ttyd --index`. Do not replace or edit ttyd's application bundle. The page
+must allow terminal title updates; avoid ttyd's fixed-title option if you use
+one. The client keeps the default title `ttyd`, applies `/ttyd-title` changes,
+and preserves the chosen title after the temporary `Pi ready` flash.
 
 Grant notification permission for the ttyd site in your browser's site settings.
 The page needs a secure context for the Notification API, such as `localhost`
