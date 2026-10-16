@@ -4,6 +4,9 @@ const DEFAULT_TITLE = "ttyd";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_TRANSFER_START = "\u001e__PI_TTYD_IMAGE_V1__";
 const IMAGE_TRANSFER_END = "__PI_TTYD_IMAGE_END_V1__";
+const IMAGE_RECEIVER_QUERY = "\u0000\u0000\u0000";
+const IMAGE_RECEIVER_MARKER = "__PI_TTYD_IMAGE_RX__:";
+const IMAGE_PAYLOAD_SEPARATOR = "\u001f";
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGE_BASE64_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
@@ -15,8 +18,13 @@ function sendTitle(ctx, title) {
   ctx.ui.setTitle(`${TITLE_MARKER}${encodeURIComponent(title)}`);
 }
 
+function sendImageReceiverState(active) {
+  const state = active ? "ready" : "inactive";
+  process.stdout.write(`\x1b]2;${IMAGE_RECEIVER_MARKER}${state}\x07`);
+}
+
 function decodeImage(payload) {
-  const separator = payload.indexOf("\n");
+  const separator = payload.indexOf(IMAGE_PAYLOAD_SEPARATOR);
   if (separator < 0) return undefined;
 
   const mimeType = payload.slice(0, separator);
@@ -47,29 +55,47 @@ export default function register(pi) {
   let transferTimeout;
   let unmatchedStart = "";
   let unsubscribeTerminalInput;
+  let receiverEnabled = false;
 
-  const clearIncomingTransfer = () => {
+  const clearTransferTimeout = () => {
     if (transferTimeout !== undefined) clearTimeout(transferTimeout);
     transferTimeout = undefined;
+  };
+
+  const clearIncomingTransfer = () => {
+    clearTransferTimeout();
     incomingTransfer = undefined;
   };
 
-  const armTransferTimeout = (ctx) => {
-    if (!incomingTransfer || incomingTransfer.discarding) return;
-    if (transferTimeout !== undefined) clearTimeout(transferTimeout);
-
-    const transfer = incomingTransfer;
+  const scheduleTransferTimeout = (ctx, transfer, delay) => {
     transferTimeout = setTimeout(() => {
       if (incomingTransfer !== transfer) return;
       transferTimeout = undefined;
+      const idleTime = Date.now() - transfer.lastActivityAt;
+      if (idleTime < IMAGE_TRANSFER_TIMEOUT_MS) {
+        scheduleTransferTimeout(ctx, transfer, IMAGE_TRANSFER_TIMEOUT_MS - idleTime);
+        return;
+      }
+
       transfer.discarding = true;
-      transfer.payload = "";
+      transfer.payloadBuffer = undefined;
+      transfer.payloadLength = 0;
       ctx.ui.notify(
         "ttyd image transfer timed out; input is discarded until its end marker or another image drop. Restart Pi to reset.",
         "warning",
       );
-    }, IMAGE_TRANSFER_TIMEOUT_MS);
+    }, delay);
     transferTimeout.unref?.();
+  };
+
+  const armTransferTimeout = (ctx) => {
+    const transfer = incomingTransfer;
+    if (!transfer || transfer.discarding) return;
+
+    transfer.lastActivityAt = Date.now();
+    if (transferTimeout === undefined) {
+      scheduleTransferTimeout(ctx, transfer, IMAGE_TRANSFER_TIMEOUT_MS);
+    }
   };
 
   const updatePendingStatus = (ctx) => {
@@ -104,13 +130,37 @@ export default function register(pi) {
     return 0;
   };
 
-  const trailingStartPrefixLength = (text) =>
-    trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START);
+  const trailingStartPrefixLength = (text) => Math.max(
+    trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START),
+    trailingMarkerPrefixLength(text, IMAGE_RECEIVER_QUERY),
+  );
 
   const trailingTransferMarkerLength = (text) => Math.max(
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START),
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_END),
+    trailingMarkerPrefixLength(text, IMAGE_RECEIVER_QUERY),
   );
+
+  const appendTransferPayload = (transfer, body) => {
+    if (transfer.discarding || transfer.tooLarge || transfer.invalid || body.length === 0) return;
+    if (transfer.payloadLength + body.length > MAX_IMAGE_PAYLOAD_CHARS) {
+      transfer.tooLarge = true;
+      transfer.payloadBuffer = undefined;
+      transfer.payloadLength = 0;
+      return;
+    }
+
+    for (let index = 0; index < body.length; index++) {
+      const character = body.charCodeAt(index);
+      if (character > 0x7f) {
+        transfer.invalid = true;
+        transfer.payloadBuffer = undefined;
+        transfer.payloadLength = 0;
+        return;
+      }
+      transfer.payloadBuffer[transfer.payloadLength++] = character;
+    }
+  };
 
   const handleTerminalInput = (data, ctx) => {
     if (!data) return;
@@ -122,7 +172,11 @@ export default function register(pi) {
         const combined = unmatchedStart + data;
         unmatchedStart = "";
         const startIndex = combined.indexOf(IMAGE_TRANSFER_START);
-        if (startIndex < 0) {
+        const queryIndex = combined.indexOf(IMAGE_RECEIVER_QUERY);
+        const markerIndex = startIndex < 0
+          ? queryIndex
+          : queryIndex < 0 ? startIndex : Math.min(startIndex, queryIndex);
+        if (markerIndex < 0) {
           const partialLength = trailingStartPrefixLength(combined);
           if (partialLength === 0 && !modified) return;
           passthrough.push(combined.slice(0, combined.length - partialLength));
@@ -131,15 +185,41 @@ export default function register(pi) {
         }
 
         modified = true;
-        passthrough.push(combined.slice(0, startIndex));
+        passthrough.push(combined.slice(0, markerIndex));
+        if (queryIndex === markerIndex) {
+          sendImageReceiverState(true);
+          data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length);
+          continue;
+        }
+
         data = combined.slice(startIndex + IMAGE_TRANSFER_START.length);
-        incomingTransfer = { payload: "", tail: "", tooLarge: false, discarding: false };
+        incomingTransfer = {
+          payloadBuffer: Buffer.alloc(MAX_IMAGE_PAYLOAD_CHARS),
+          payloadLength: 0,
+          tail: "",
+          tooLarge: false,
+          invalid: false,
+          discarding: false,
+          lastActivityAt: Date.now(),
+        };
       }
 
       armTransferTimeout(ctx);
       const transfer = incomingTransfer;
       const combined = transfer.tail + data;
+      const queryIndex = combined.indexOf(IMAGE_RECEIVER_QUERY);
       const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
+      if (queryIndex >= 0 && (endIndex < 0 || queryIndex < endIndex)) {
+        clearTransferTimeout();
+        transfer.discarding = true;
+        transfer.payloadBuffer = undefined;
+        transfer.payloadLength = 0;
+        sendImageReceiverState(true);
+        data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length);
+        modified = true;
+        continue;
+      }
+
       const startIndex = transfer.discarding ? combined.indexOf(IMAGE_TRANSFER_START) : -1;
       if (startIndex >= 0 && (endIndex < 0 || startIndex < endIndex)) {
         clearIncomingTransfer();
@@ -152,15 +232,7 @@ export default function register(pi) {
       const body = endIndex < 0
         ? combined.slice(0, combined.length - tailLength)
         : combined.slice(0, endIndex);
-
-      if (!transfer.discarding && !transfer.tooLarge) {
-        if (transfer.payload.length + body.length > MAX_IMAGE_PAYLOAD_CHARS) {
-          transfer.tooLarge = true;
-          transfer.payload = "";
-        } else {
-          transfer.payload += body;
-        }
-      }
+      appendTransferPayload(transfer, body);
 
       if (endIndex < 0) {
         transfer.tail = tailLength === 0 ? "" : combined.slice(-tailLength);
@@ -168,13 +240,15 @@ export default function register(pi) {
       }
 
       data = combined.slice(endIndex + IMAGE_TRANSFER_END.length);
-      const { payload, tooLarge, discarding } = transfer;
+      const { payloadBuffer, payloadLength, tooLarge, invalid, discarding } = transfer;
       clearIncomingTransfer();
       if (!discarding) {
         if (tooLarge) {
           ctx.ui.notify("ttyd images must be 4 MiB or smaller", "warning");
+        } else if (invalid) {
+          ctx.ui.notify("Rejected an unsupported or invalid ttyd image", "warning");
         } else {
-          acceptImage(payload, ctx);
+          acceptImage(payloadBuffer.toString("ascii", 0, payloadLength), ctx);
         }
       }
       modified = true;
@@ -204,8 +278,10 @@ export default function register(pi) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    if (receiverEnabled) sendImageReceiverState(false);
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
+    receiverEnabled = false;
     clearIncomingTransfer();
     unmatchedStart = "";
     pendingImages = [];
@@ -213,6 +289,7 @@ export default function register(pi) {
 
     if (ctx.mode === "tui") {
       unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => handleTerminalInput(data, ctx));
+      receiverEnabled = true;
     }
     if (notificationsEnabled) sendTitle(ctx, DEFAULT_TITLE);
   });
@@ -220,6 +297,8 @@ export default function register(pi) {
   pi.on("session_shutdown", (_event, ctx) => {
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
+    if (receiverEnabled) sendImageReceiverState(false);
+    receiverEnabled = false;
     clearIncomingTransfer();
     unmatchedStart = "";
     pendingImages = [];
@@ -227,7 +306,7 @@ export default function register(pi) {
   });
 
   pi.on("input", (event, ctx) => {
-    if (event.source !== "interactive" || event.text.startsWith("/") || pendingImages.length === 0) {
+    if (event.source !== "interactive" || pendingImages.length === 0) {
       return { action: "continue" };
     }
 

@@ -72,14 +72,23 @@ test("sets explicit titles and restores them after a ready notification", () => 
   assert.equal(document.title, customTitle);
 });
 
-test("prevents image drops from navigating and sends them through ttyd input", async () => {
+test("waits for a Pi receiver and serializes concurrent image drops", async () => {
   const listeners = new Map();
   const terminalInput = [];
+  const timeouts = new Map();
+  const warnings = [];
+  let nextTimeoutId = 0;
+  let onMutation;
   let focused = false;
+  let firstReadStarted = false;
+  let secondReadStarted = false;
+  let resolveFirstRead;
+  let titleValue = "ttyd - Terminal";
   const titleElement = {};
   const document = {
     hidden: false,
-    title: "ttyd - Terminal",
+    get title() { return titleValue; },
+    set title(title) { titleValue = title; },
     querySelector: () => titleElement,
     addEventListener(type, handler, capture) {
       listeners.set(type, handler);
@@ -87,10 +96,133 @@ test("prevents image drops from navigating and sends them through ttyd input", a
     },
   };
   const window = {
-    clearTimeout() {},
-    setTimeout() { return 1; },
+    clearTimeout(id) { timeouts.delete(id); },
+    setTimeout(callback, delay) {
+      const id = ++nextTimeoutId;
+      if (delay === 0) queueMicrotask(callback);
+      else timeouts.set(id, callback);
+      return id;
+    },
     term: {
       focus() { focused = true; },
+      input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
+    },
+  };
+  class MockMutationObserver {
+    constructor(callback) { onMutation = callback; }
+    observe() {}
+  }
+  const firstBytes = Uint8Array.of(1, 2, 3, 4);
+  const secondBytes = Uint8Array.of(5, 6, 7, 8);
+  const firstFile = {
+    name: "first.png",
+    type: "image/png",
+    size: firstBytes.length,
+    arrayBuffer: () => new Promise((resolve) => {
+      firstReadStarted = true;
+      resolveFirstRead = resolve;
+    }),
+  };
+  const secondFile = {
+    name: "second.png",
+    type: "image/png",
+    size: secondBytes.length,
+    arrayBuffer: async () => {
+      secondReadStarted = true;
+      return secondBytes.buffer;
+    },
+  };
+
+  runInNewContext(clientSource, {
+    document,
+    window,
+    MutationObserver: MockMutationObserver,
+    btoa,
+    console: { warn: (...args) => warnings.push(args) },
+  });
+
+  let dragPrevented = false;
+  listeners.get("dragover")({
+    dataTransfer: { items: [{ kind: "file", type: "" }] },
+    preventDefault() { dragPrevented = true; },
+  });
+  assert.equal(dragPrevented, true);
+
+  const dropEvents = [];
+  const drop = (file) => listeners.get("drop")({
+    dataTransfer: { files: [file] },
+    preventDefault() { dropEvents.push("prevented"); },
+    stopPropagation() { dropEvents.push("stopped"); },
+  });
+  const firstDrop = drop(firstFile);
+  const secondDrop = drop(secondFile);
+  await Promise.resolve();
+
+  const receiverQuery = "\u0000\u0000\u0000";
+  assert.deepEqual(terminalInput, [{ data: receiverQuery, wasUserInput: true }]);
+  assert.equal(firstReadStarted, false);
+  assert.equal(secondReadStarted, false);
+
+  document.title = "__PI_TTYD_IMAGE_RX__:ready | ttyd";
+  onMutation();
+  await Promise.resolve();
+  assert.equal(firstReadStarted, true);
+  assert.equal(secondReadStarted, false);
+  resolveFirstRead(firstBytes.buffer);
+  await Promise.all([firstDrop, secondDrop]);
+
+  const encodedFirst = Buffer.from(firstBytes).toString("base64");
+  const encodedSecond = Buffer.from(secondBytes).toString("base64");
+  assert.deepEqual(dropEvents, ["prevented", "stopped", "prevented", "stopped"]);
+  assert.equal(focused, true);
+  assert.equal(secondReadStarted, true);
+  assert.deepEqual(terminalInput.map((entry) => entry.wasUserInput), [true, true, true, true, true, true, true]);
+  assert.equal(
+    terminalInput.slice(1).map((entry) => entry.data).join(""),
+    `\u001e__PI_TTYD_IMAGE_V1__image/png\u001f${encodedFirst}__PI_TTYD_IMAGE_END_V1__` +
+      `\u001e__PI_TTYD_IMAGE_V1__image/png\u001f${encodedSecond}__PI_TTYD_IMAGE_END_V1__`,
+  );
+
+  document.title = "__PI_TTYD_IMAGE_RX__:inactive | ttyd";
+  onMutation();
+  const inactiveDrop = drop({
+    name: "after-exit.png",
+    type: "image/png",
+    size: 1,
+    arrayBuffer() { throw new Error("must not read image without a receiver"); },
+  });
+  await Promise.resolve();
+  assert.equal(terminalInput.length, 8);
+  assert.equal(terminalInput.at(-1).data, receiverQuery);
+  [...timeouts.values()][0]();
+  await inactiveDrop;
+  assert.equal(terminalInput.length, 8);
+  assert.match(warnings.at(-1)[0], /no active Pi image receiver/);
+});
+
+test("does not send dropped image data without an active Pi receiver", async () => {
+  const listeners = new Map();
+  const terminalInput = [];
+  const timeouts = new Map();
+  let nextTimeoutId = 0;
+  let imageRead = false;
+  const warnings = [];
+  const titleElement = {};
+  const document = {
+    hidden: false,
+    title: "ttyd - Terminal",
+    querySelector: () => titleElement,
+    addEventListener(type, handler) { listeners.set(type, handler); },
+  };
+  const window = {
+    clearTimeout(id) { timeouts.delete(id); },
+    setTimeout(callback) {
+      const id = ++nextTimeoutId;
+      timeouts.set(id, callback);
+      return id;
+    },
+    term: {
+      focus() {},
       input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
     },
   };
@@ -103,7 +235,10 @@ test("prevents image drops from navigating and sends them through ttyd input", a
     name: "sample.png",
     type: "image/png",
     size: imageBytes.length,
-    arrayBuffer: async () => imageBytes.buffer,
+    arrayBuffer: async () => {
+      imageRead = true;
+      return imageBytes.buffer;
+    },
   };
 
   runInNewContext(clientSource, {
@@ -111,30 +246,23 @@ test("prevents image drops from navigating and sends them through ttyd input", a
     window,
     MutationObserver: MockMutationObserver,
     btoa,
+    console: { warn: (...args) => warnings.push(args) },
   });
 
-  let dragPrevented = false;
-  listeners.get("dragover")({
-    dataTransfer: { items: [{ kind: "file", type: "" }] },
-    preventDefault() { dragPrevented = true; },
-  });
-  assert.equal(dragPrevented, true);
-
-  let dropPrevented = false;
-  let propagationStopped = false;
-  await listeners.get("drop")({
+  const dropPromise = listeners.get("drop")({
     dataTransfer: { files: [file] },
-    preventDefault() { dropPrevented = true; },
-    stopPropagation() { propagationStopped = true; },
+    preventDefault() {},
+    stopPropagation() {},
   });
+  await Promise.resolve();
+  assert.equal(terminalInput.length, 1);
+  assert.equal(terminalInput[0].data, "\u0000\u0000\u0000");
+  assert.equal(imageRead, false);
 
-  const encoded = Buffer.from(imageBytes).toString("base64");
-  assert.equal(dropPrevented, true);
-  assert.equal(propagationStopped, true);
-  assert.equal(focused, true);
-  assert.deepEqual(terminalInput.map((entry) => entry.wasUserInput), [true, true, true]);
-  assert.equal(
-    terminalInput.map((entry) => entry.data).join(""),
-    `\u001e__PI_TTYD_IMAGE_V1__image/png\n${encoded}__PI_TTYD_IMAGE_END_V1__`,
-  );
+  const timeout = [...timeouts.values()][0];
+  timeout();
+  await dropPromise;
+  assert.equal(terminalInput.length, 1);
+  assert.equal(imageRead, false);
+  assert.match(warnings[0][0], /no active Pi image receiver/);
 });

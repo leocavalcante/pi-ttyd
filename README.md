@@ -13,10 +13,12 @@ session text. Settlement means Pi is waiting for input; it does not mean the
 task succeeded.
 
 With the client script and extension installed, drop a PNG, JPEG, GIF, or WebP
-image onto the ttyd page to attach it to your next prompt. The image stays out
-of the editor text, and dropping it does not submit the prompt. Each image is
-limited to 4 MiB, with up to four images pending per prompt. ttyd must be
-started writable (`--writable` or `-W`).
+image onto the ttyd page to attach it to your next prompt. The client confirms
+that Pi's TUI receiver is active before sending image data; drops are ignored
+when only a shell is running or Pi has exited. The image stays out of the editor
+text, and dropping it does not submit the prompt. Each image is limited to 4 MiB,
+with up to four images pending per prompt. ttyd must be started writable
+(`--writable` or `-W`).
 
 ## Install
 

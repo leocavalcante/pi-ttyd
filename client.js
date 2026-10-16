@@ -4,11 +4,15 @@
 
   const readyMarker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+.*)?$/;
   const titleMarker = /^__PI_TTYD_TITLE__:([^\s]*)(?:\s+\|\s+.*)?$/;
+  const imageReceiverMarker = /^__PI_TTYD_IMAGE_RX__:(ready|inactive)(?:\s+\|\s+.*)?$/;
   const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
   const imageTransferStart = "\u001e__PI_TTYD_IMAGE_V1__";
   const imageTransferEnd = "__PI_TTYD_IMAGE_END_V1__";
+  const imageReceiverQuery = "\u0000\u0000\u0000";
+  const imagePayloadSeparator = "\u001f";
   const maxImageBytes = 4 * 1024 * 1024;
   const chunkSize = 48 * 1024;
+  const imageReceiverTimeoutMs = 2000;
   const imageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
   const extensionTypes = new Map([
     ["png", "image/png"],
@@ -21,6 +25,10 @@
   let lastEventId = "";
   let lastAppliedTitle;
   let restoreTimer;
+  let imageReceiverActive = false;
+  let imageReceiverRequest;
+  let imageReceiverRequestTimer;
+  let imageDropQueue = Promise.resolve();
 
   const imageMimeType = (file) => {
     const type = (file.type || "").toLowerCase();
@@ -54,7 +62,45 @@
     return btoa(binary);
   };
 
+  const resolveImageReceiverRequest = (active) => {
+    if (!imageReceiverRequest) return;
+    const request = imageReceiverRequest;
+    imageReceiverRequest = undefined;
+    window.clearTimeout(imageReceiverRequestTimer);
+    imageReceiverRequestTimer = undefined;
+    request.resolve(active);
+  };
+
+  const requestImageReceiver = () => {
+    if (imageReceiverActive) return Promise.resolve(true);
+    const terminal = window.term;
+    if (!terminal || typeof terminal.input !== "function") return Promise.resolve(false);
+    if (imageReceiverRequest) return imageReceiverRequest.promise;
+
+    let resolve;
+    const request = {
+      promise: new Promise((done) => { resolve = done; }),
+      resolve: (active) => resolve(active),
+    };
+    imageReceiverRequest = request;
+    imageReceiverRequestTimer = window.setTimeout(() => {
+      if (imageReceiverRequest !== request) return;
+      imageReceiverRequest = undefined;
+      imageReceiverRequestTimer = undefined;
+      request.resolve(false);
+    }, imageReceiverTimeoutMs);
+
+    try {
+      terminal.focus();
+      terminal.input(imageReceiverQuery, true);
+    } catch {
+      resolveImageReceiverRequest(false);
+    }
+    return request.promise;
+  };
+
   const sendImage = async (file) => {
+    if (!imageReceiverActive) return false;
     const mimeType = imageMimeType(file);
     if (!mimeType) {
       console.warn("pi-ttyd: only PNG, JPEG, GIF, and WebP images are supported");
@@ -66,6 +112,7 @@
     }
 
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (!imageReceiverActive) return false;
     if (bytes.length === 0 || bytes.length > maxImageBytes) {
       console.warn("pi-ttyd: images must be non-empty and 4 MiB or smaller");
       return;
@@ -74,35 +121,52 @@
     const terminal = window.term;
     if (!terminal || typeof terminal.input !== "function") {
       console.warn("pi-ttyd: ttyd terminal input is unavailable");
-      return;
+      return false;
     }
 
     const base64 = toBase64(bytes);
     terminal.focus();
-    terminal.input(`${imageTransferStart}${mimeType}\n`, true);
+    terminal.input(`${imageTransferStart}${mimeType}${imagePayloadSeparator}`, true);
     for (let offset = 0; offset < base64.length; offset += chunkSize) {
+      if (!imageReceiverActive) return false;
       terminal.input(base64.slice(offset, offset + chunkSize), true);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
+    if (!imageReceiverActive) return false;
     terminal.input(imageTransferEnd, true);
+    return true;
+  };
+
+  const processDroppedImages = async (images) => {
+    if (!(await requestImageReceiver())) {
+      console.warn("pi-ttyd: no active Pi image receiver; image drop ignored");
+      return;
+    }
+
+    for (const file of images) {
+      if (!imageReceiverActive) return;
+      try {
+        if (await sendImage(file) === false && !imageReceiverActive) return;
+      } catch (error) {
+        console.warn("pi-ttyd: could not send dropped image", error);
+      }
+    }
   };
 
   const handleImageDragOver = (event) => {
     if (hasFileDrop(event.dataTransfer)) event.preventDefault();
   };
 
-  const handleImageDrop = async (event) => {
+  const handleImageDrop = (event) => {
     const images = droppedFiles(event.dataTransfer).filter(isImageFile);
     if (images.length === 0) return;
 
     event.preventDefault();
     event.stopPropagation();
-    for (const file of images) {
-      try {
-        await sendImage(file);
-      } catch (error) {
-        console.warn("pi-ttyd: could not send dropped image", error);
-      }
-    }
+    imageDropQueue = imageDropQueue
+      .then(() => processDroppedImages(images))
+      .catch((error) => console.warn("pi-ttyd: could not send dropped image", error));
+    return imageDropQueue;
   };
 
   document.addEventListener("dragover", handleImageDragOver, true);
@@ -121,6 +185,14 @@
       return;
     }
     lastAppliedTitle = undefined;
+
+    const receiverMatch = imageReceiverMarker.exec(title);
+    if (receiverMatch) {
+      imageReceiverActive = receiverMatch[1] === "ready";
+      resolveImageReceiverRequest(imageReceiverActive);
+      setPageTitle(currentTitle);
+      return;
+    }
 
     const titleMatch = titleMarker.exec(title);
     if (titleMatch) {
