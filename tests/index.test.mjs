@@ -2,21 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import register from "../index.js";
 
-async function withEnvironment(value, callback) {
-  const previous = process.env.PI_TTYD_NOTIFY;
-  if (value === undefined) delete process.env.PI_TTYD_NOTIFY;
-  else process.env.PI_TTYD_NOTIFY = value;
+async function withEnvironment(values, callback) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 
   try {
     await callback();
   } finally {
-    if (previous === undefined) delete process.env.PI_TTYD_NOTIFY;
-    else process.env.PI_TTYD_NOTIFY = previous;
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
 test("registers image input without enabling title notifications", async () => {
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     const registrations = [];
     const commands = [];
     register({
@@ -29,7 +34,7 @@ test("registers image input without enabling title notifications", async () => {
 });
 
 test("sets and resets the ttyd tab title", async () => {
-  await withEnvironment("1", async () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: "1", TMUX: undefined }, async () => {
     const events = new Map();
     const commands = new Map();
     register({
@@ -68,7 +73,7 @@ test("sets and resets the ttyd tab title", async () => {
 });
 
 test("emits a title marker after the agent settles", async () => {
-  await withEnvironment("1", () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: "1", TMUX: undefined }, () => {
     const events = new Map();
     const originalWrite = process.stdout.write;
     const output = [];
@@ -93,7 +98,7 @@ test("emits a title marker after the agent settles", async () => {
 test("answers receiver queries and invalidates the capability on shutdown", async () => {
   const handlers = new Map();
   let terminalInput;
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     register({ on: (event, handler) => handlers.set(event, handler) });
   });
   const ctx = {
@@ -112,18 +117,21 @@ test("answers receiver queries and invalidates the capability on shutdown", asyn
   };
 
   try {
-    handlers.get("session_start")({}, ctx);
-    const query = "\u0000\u0000\u0000";
-    assert.deepEqual(terminalInput(`typed ${query.slice(0, 1)}`), { data: "typed " });
-    assert.deepEqual(terminalInput(query.slice(1)), { consume: true });
-    assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:ready\x07"]);
+    await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
+      handlers.get("session_start")({}, ctx);
+      const query = "\u0000\u0000\u00000123456789ab";
+      assert.deepEqual(terminalInput(`typed ${query.slice(0, 7)}`), { data: "typed " });
+      assert.deepEqual(output, []);
+      assert.deepEqual(terminalInput(query.slice(7)), { consume: true });
+      assert.deepEqual(output, ["\x1b]2;__PI_TTYD_IMAGE_RX__:0123456789ab:ready\x07"]);
 
-    handlers.get("session_shutdown")({}, ctx);
-    assert.deepEqual(output, [
-      "\x1b]2;__PI_TTYD_IMAGE_RX__:ready\x07",
-      "\x1b]2;__PI_TTYD_IMAGE_RX__:inactive\x07",
-    ]);
-    assert.equal(terminalInput, undefined);
+      handlers.get("session_shutdown")({}, ctx);
+      assert.deepEqual(output, [
+        "\x1b]2;__PI_TTYD_IMAGE_RX__:0123456789ab:ready\x07",
+        "\x1b]2;__PI_TTYD_IMAGE_RX__:inactive\x07",
+      ]);
+      assert.equal(terminalInput, undefined);
+    });
   } finally {
     process.stdout.write = originalWrite;
   }
@@ -134,7 +142,7 @@ test("captures a streamed image and attaches it to the next interactive prompt",
   const statuses = [];
   const notifications = [];
   let terminalInput;
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     register({ on: (event, handler) => handlers.set(event, handler) });
   });
 
@@ -149,7 +157,10 @@ test("captures a streamed image and attaches it to the next interactive prompt",
       notify: (...args) => notifications.push(args),
     },
   };
-  handlers.get("session_start")({}, ctx);
+  await withEnvironment(
+    { PI_TTYD_NOTIFY: undefined, TMUX: undefined },
+    () => handlers.get("session_start")({}, ctx),
+  );
 
   const imageBytes = Buffer.from("test image");
   const imageData = imageBytes.toString("base64");
@@ -175,7 +186,7 @@ test("captures a streamed image and attaches it to the next interactive prompt",
 test("buffers a split image start marker without leaking it", async () => {
   const handlers = new Map();
   let terminalInput;
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     register({ on: (event, handler) => handlers.set(event, handler) });
   });
   const ctx = {
@@ -186,7 +197,10 @@ test("buffers a split image start marker without leaking it", async () => {
       notify() {},
     },
   };
-  handlers.get("session_start")({}, ctx);
+  await withEnvironment(
+    { PI_TTYD_NOTIFY: undefined, TMUX: undefined },
+    () => handlers.get("session_start")({}, ctx),
+  );
 
   const start = "\u001e__PI_TTYD_IMAGE_V1__";
   const end = "__PI_TTYD_IMAGE_END_V1__";
@@ -205,7 +219,7 @@ test("attaches multiple image frames coalesced into one terminal read", async ()
   const handlers = new Map();
   const statuses = [];
   let terminalInput;
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     register({ on: (event, handler) => handlers.set(event, handler) });
   });
   const ctx = {
@@ -216,7 +230,10 @@ test("attaches multiple image frames coalesced into one terminal read", async ()
       notify() {},
     },
   };
-  handlers.get("session_start")({}, ctx);
+  await withEnvironment(
+    { PI_TTYD_NOTIFY: undefined, TMUX: undefined },
+    () => handlers.get("session_start")({}, ctx),
+  );
 
   const start = "\u001e__PI_TTYD_IMAGE_V1__";
   const end = "__PI_TTYD_IMAGE_END_V1__";
@@ -239,7 +256,7 @@ test("uses one inactivity timer and discards stalled transfers before resynchron
   const handlers = new Map();
   const notifications = [];
   let terminalInput;
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     register({ on: (event, handler) => handlers.set(event, handler) });
   });
   const ctx = {
@@ -250,7 +267,10 @@ test("uses one inactivity timer and discards stalled transfers before resynchron
       notify: (...args) => notifications.push(args),
     },
   };
-  handlers.get("session_start")({}, ctx);
+  await withEnvironment(
+    { PI_TTYD_NOTIFY: undefined, TMUX: undefined },
+    () => handlers.get("session_start")({}, ctx),
+  );
 
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
@@ -318,7 +338,7 @@ test("rejects unsupported image payloads", async () => {
   const handlers = new Map();
   const notifications = [];
   let terminalInput;
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     register({ on: (event, handler) => handlers.set(event, handler) });
   });
   const ctx = {
@@ -329,10 +349,52 @@ test("rejects unsupported image payloads", async () => {
       notify: (...args) => notifications.push(args),
     },
   };
-  handlers.get("session_start")({}, ctx);
+  await withEnvironment(
+    { PI_TTYD_NOTIFY: undefined, TMUX: undefined },
+    () => handlers.get("session_start")({}, ctx),
+  );
 
   const result = terminalInput("\u001e__PI_TTYD_IMAGE_V1__image/svg+xml\u001fPHN2Zz4=__PI_TTYD_IMAGE_END_V1__");
   assert.deepEqual(result, { consume: true });
   assert.deepEqual(notifications, [["Rejected an unsupported or invalid ttyd image", "warning"]]);
   assert.deepEqual(handlers.get("input")({ source: "interactive", text: "Describe it" }, ctx), { action: "continue" });
+});
+
+test("wraps terminal markers in tmux passthrough", async () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: "1", TMUX: "/tmp/tmux,123,0" }, () => {
+    const events = new Map();
+    let terminalInput;
+    const originalWrite = process.stdout.write;
+    const output = [];
+    process.stdout.write = (chunk) => {
+      output.push(String(chunk));
+      return true;
+    };
+
+    try {
+      register({
+        on: (name, handler) => events.set(name, handler),
+        registerCommand() {},
+      });
+      const ctx = {
+        mode: "tui",
+        ui: {
+          onTerminalInput: (handler) => { terminalInput = handler; return () => {}; },
+          setTitle() {},
+          setStatus() {},
+          notify() {},
+        },
+      };
+      events.get("session_start")({}, ctx);
+      assert.deepEqual(terminalInput("\u0000\u0000\u00000123456789ab"), { consume: true });
+      events.get("agent_settled")();
+      events.get("session_shutdown")({}, ctx);
+
+      assert.match(output[0], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD_IMAGE_RX__:0123456789ab:ready\x07\x1b\\$/);
+      assert.match(output[1], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD__:\d+:\d+:\d+\x07\x1b\\$/);
+      assert.match(output[2], /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD_IMAGE_RX__:inactive\x07\x1b\\$/);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+  });
 });

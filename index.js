@@ -5,6 +5,7 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_TRANSFER_START = "\u001e__PI_TTYD_IMAGE_V1__";
 const IMAGE_TRANSFER_END = "__PI_TTYD_IMAGE_END_V1__";
 const IMAGE_RECEIVER_QUERY = "\u0000\u0000\u0000";
+const IMAGE_RECEIVER_QUERY_ID_LENGTH = 12;
 const IMAGE_RECEIVER_MARKER = "__PI_TTYD_IMAGE_RX__:";
 const IMAGE_PAYLOAD_SEPARATOR = "\u001f";
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -14,13 +15,24 @@ const MAX_IMAGE_PAYLOAD_CHARS = MAX_IMAGE_BASE64_CHARS + 32;
 const MAX_PENDING_IMAGES = 4;
 const IMAGE_TRANSFER_TIMEOUT_MS = 30_000;
 
+function terminalTitleSequence(title) {
+  const sequence = `\x1b]2;${title}\x07`;
+  if (!process.env.TMUX) return sequence;
+  return `\x1bPtmux;${sequence.replace(/\x1b/g, "\x1b\x1b")}\x1b\\`;
+}
+
+function writeTitle(title) {
+  process.stdout.write(terminalTitleSequence(title));
+}
+
 function sendTitle(ctx, title) {
   ctx.ui.setTitle(`${TITLE_MARKER}${encodeURIComponent(title)}`);
 }
 
-function sendImageReceiverState(active) {
+function sendImageReceiverState(active, queryId) {
   const state = active ? "ready" : "inactive";
-  process.stdout.write(`\x1b]2;${IMAGE_RECEIVER_MARKER}${state}\x07`);
+  const request = queryId ? `${queryId}:` : "";
+  writeTitle(`${IMAGE_RECEIVER_MARKER}${request}${state}`);
 }
 
 function decodeImage(payload) {
@@ -130,15 +142,34 @@ export default function register(pi) {
     return 0;
   };
 
+  const trailingQueryPrefixLength = (text) => {
+    const markerPrefixLength = trailingMarkerPrefixLength(text, IMAGE_RECEIVER_QUERY);
+    if (markerPrefixLength > 0) return markerPrefixLength;
+
+    const markerIndex = text.lastIndexOf(IMAGE_RECEIVER_QUERY);
+    if (markerIndex < 0) return 0;
+    const idPart = text.slice(markerIndex + IMAGE_RECEIVER_QUERY.length);
+    if (idPart.length >= IMAGE_RECEIVER_QUERY_ID_LENGTH || !/^[a-z0-9]*$/.test(idPart)) return 0;
+    return text.length - markerIndex;
+  };
+
+  const readImageReceiverQueryId = (text, markerIndex) => {
+    const idStart = markerIndex + IMAGE_RECEIVER_QUERY.length;
+    const idEnd = idStart + IMAGE_RECEIVER_QUERY_ID_LENGTH;
+    if (idEnd > text.length) return undefined;
+    const queryId = text.slice(idStart, idEnd);
+    return /^[a-z0-9]{12}$/.test(queryId) ? queryId : undefined;
+  };
+
   const trailingStartPrefixLength = (text) => Math.max(
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START),
-    trailingMarkerPrefixLength(text, IMAGE_RECEIVER_QUERY),
+    trailingQueryPrefixLength(text),
   );
 
   const trailingTransferMarkerLength = (text) => Math.max(
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_START),
     trailingMarkerPrefixLength(text, IMAGE_TRANSFER_END),
-    trailingMarkerPrefixLength(text, IMAGE_RECEIVER_QUERY),
+    trailingQueryPrefixLength(text),
   );
 
   const appendTransferPayload = (transfer, body) => {
@@ -187,7 +218,20 @@ export default function register(pi) {
         modified = true;
         passthrough.push(combined.slice(0, markerIndex));
         if (queryIndex === markerIndex) {
-          sendImageReceiverState(true);
+          const queryId = readImageReceiverQueryId(combined, queryIndex);
+          if (queryId) {
+            sendImageReceiverState(true, queryId);
+            data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length + IMAGE_RECEIVER_QUERY_ID_LENGTH);
+            continue;
+          }
+
+          const partialLength = trailingQueryPrefixLength(combined);
+          if (partialLength > 0 && queryIndex === combined.length - partialLength) {
+            unmatchedStart = combined.slice(queryIndex);
+            break;
+          }
+
+          passthrough.push(combined.slice(queryIndex, queryIndex + IMAGE_RECEIVER_QUERY.length));
           data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length);
           continue;
         }
@@ -209,13 +253,14 @@ export default function register(pi) {
       const combined = transfer.tail + data;
       const queryIndex = combined.indexOf(IMAGE_RECEIVER_QUERY);
       const endIndex = combined.indexOf(IMAGE_TRANSFER_END);
-      if (queryIndex >= 0 && (endIndex < 0 || queryIndex < endIndex)) {
+      const queryId = queryIndex < 0 ? undefined : readImageReceiverQueryId(combined, queryIndex);
+      if (queryId && (endIndex < 0 || queryIndex < endIndex)) {
         clearTransferTimeout();
         transfer.discarding = true;
         transfer.payloadBuffer = undefined;
         transfer.payloadLength = 0;
-        sendImageReceiverState(true);
-        data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length);
+        sendImageReceiverState(true, queryId);
+        data = combined.slice(queryIndex + IMAGE_RECEIVER_QUERY.length + IMAGE_RECEIVER_QUERY_ID_LENGTH);
         modified = true;
         continue;
       }
@@ -319,7 +364,7 @@ export default function register(pi) {
   if (notificationsEnabled) {
     pi.on("agent_settled", () => {
       const eventId = `${process.pid}:${Date.now()}:${++sequence}`;
-      process.stdout.write(`\x1b]2;${READY_MARKER}:${eventId}\x07`);
+      writeTitle(`${READY_MARKER}:${eventId}`);
     });
   }
 }

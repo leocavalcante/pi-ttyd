@@ -4,7 +4,7 @@
 
   const readyMarker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+.*)?$/;
   const titleMarker = /^__PI_TTYD_TITLE__:([^\s]*)(?:\s+\|\s+.*)?$/;
-  const imageReceiverMarker = /^__PI_TTYD_IMAGE_RX__:(ready|inactive)(?:\s+\|\s+.*)?$/;
+  const imageReceiverMarker = /^__PI_TTYD_IMAGE_RX__:(?:([a-z0-9]{12}):)?(ready|inactive)(?:\s+\|\s+.*)?$/;
   const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
   const imageTransferStart = "\u001e__PI_TTYD_IMAGE_V1__";
   const imageTransferEnd = "__PI_TTYD_IMAGE_END_V1__";
@@ -26,6 +26,8 @@
   let lastAppliedTitle;
   let restoreTimer;
   let imageReceiverActive = false;
+  const imageReceiverQueryIdPrefix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  let imageReceiverQuerySequence = 0;
   let imageReceiverRequest;
   let imageReceiverRequestTimer;
   let imageDropQueue = Promise.resolve();
@@ -62,9 +64,12 @@
     return btoa(binary);
   };
 
-  const resolveImageReceiverRequest = (active) => {
-    if (!imageReceiverRequest) return;
+  const nextImageReceiverQueryId = () =>
+    `${imageReceiverQueryIdPrefix}${(++imageReceiverQuerySequence).toString(36).padStart(6, "0")}`;
+
+  const resolveImageReceiverRequest = (queryId, active) => {
     const request = imageReceiverRequest;
+    if (!request || request.id !== queryId) return;
     imageReceiverRequest = undefined;
     window.clearTimeout(imageReceiverRequestTimer);
     imageReceiverRequestTimer = undefined;
@@ -76,24 +81,24 @@
     if (!terminal || typeof terminal.input !== "function") return Promise.resolve(false);
     if (imageReceiverRequest) return imageReceiverRequest.promise;
 
+    imageReceiverActive = false;
+    const queryId = nextImageReceiverQueryId();
     let resolve;
     const request = {
+      id: queryId,
       promise: new Promise((done) => { resolve = done; }),
       resolve: (active) => resolve(active),
     };
     imageReceiverRequest = request;
     imageReceiverRequestTimer = window.setTimeout(() => {
-      if (imageReceiverRequest !== request) return;
-      imageReceiverRequest = undefined;
-      imageReceiverRequestTimer = undefined;
-      request.resolve(false);
+      resolveImageReceiverRequest(queryId, false);
     }, imageReceiverTimeoutMs);
 
     try {
       terminal.focus();
-      terminal.input(imageReceiverQuery, true);
+      terminal.input(`${imageReceiverQuery}${queryId}`, true);
     } catch {
-      resolveImageReceiverRequest(false);
+      resolveImageReceiverRequest(queryId, false);
     }
     return request.promise;
   };
@@ -117,13 +122,15 @@
       return;
     }
 
+    const base64 = toBase64(bytes);
+    if (!(await requestImageReceiver()) || !imageReceiverActive) return false;
+
     const terminal = window.term;
     if (!terminal || typeof terminal.input !== "function") {
       console.warn("pi-ttyd: ttyd terminal input is unavailable");
       return false;
     }
 
-    const base64 = toBase64(bytes);
     terminal.focus();
     terminal.input(`${imageTransferStart}${mimeType}${imagePayloadSeparator}`, true);
     // Keep chunks synchronous so keyboard and paste events cannot interleave.
@@ -191,8 +198,15 @@
 
     const receiverMatch = imageReceiverMarker.exec(title);
     if (receiverMatch) {
-      imageReceiverActive = receiverMatch[1] === "ready";
-      resolveImageReceiverRequest(imageReceiverActive);
+      const [, queryId, state] = receiverMatch;
+      const active = state === "ready";
+      if (queryId && imageReceiverRequest?.id === queryId) {
+        imageReceiverActive = active;
+        resolveImageReceiverRequest(queryId, active);
+      } else if (!queryId && !active) {
+        imageReceiverActive = false;
+        if (imageReceiverRequest) resolveImageReceiverRequest(imageReceiverRequest.id, false);
+      }
       setPageTitle(currentTitle);
       return;
     }

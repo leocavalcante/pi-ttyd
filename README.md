@@ -38,6 +38,12 @@ PI_TTYD_NOTIFY=1 ttyd ...
 For a shell function that runs `command ttyd`, prefix that command with
 `PI_TTYD_NOTIFY=1`.
 
+When ttyd attaches to a pre-existing tmux session, its environment may not reach
+Pi processes in that session. Start Pi from the pane with
+`PI_TTYD_NOTIFY=1 pi --continue`, or export the variable before starting Pi.
+The tmux window must have `allow-passthrough on`; the extension wraps readiness
+and image receiver markers for tmux passthrough.
+
 ## Configure ttyd's browser page
 
 The client uses the terminal-title and input APIs exposed by ttyd's xterm
