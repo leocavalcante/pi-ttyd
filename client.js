@@ -72,7 +72,6 @@
   };
 
   const requestImageReceiver = () => {
-    if (imageReceiverActive) return Promise.resolve(true);
     const terminal = window.term;
     if (!terminal || typeof terminal.input !== "function") return Promise.resolve(false);
     if (imageReceiverRequest) return imageReceiverRequest.promise;
@@ -127,10 +126,10 @@
     const base64 = toBase64(bytes);
     terminal.focus();
     terminal.input(`${imageTransferStart}${mimeType}${imagePayloadSeparator}`, true);
+    // Keep chunks synchronous so keyboard and paste events cannot interleave.
     for (let offset = 0; offset < base64.length; offset += chunkSize) {
       if (!imageReceiverActive) return false;
       terminal.input(base64.slice(offset, offset + chunkSize), true);
-      await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
     if (!imageReceiverActive) return false;
     terminal.input(imageTransferEnd, true);
@@ -138,18 +137,22 @@
   };
 
   const processDroppedImages = async (images) => {
-    if (!(await requestImageReceiver())) {
-      console.warn("pi-ttyd: no active Pi image receiver; image drop ignored");
-      return;
-    }
-
-    for (const file of images) {
-      if (!imageReceiverActive) return;
-      try {
-        if (await sendImage(file) === false && !imageReceiverActive) return;
-      } catch (error) {
-        console.warn("pi-ttyd: could not send dropped image", error);
+    try {
+      if (!(await requestImageReceiver())) {
+        console.warn("pi-ttyd: no active Pi image receiver; image drop ignored");
+        return;
       }
+
+      for (const file of images) {
+        if (!imageReceiverActive) return;
+        try {
+          if (await sendImage(file) === false && !imageReceiverActive) return;
+        } catch (error) {
+          console.warn("pi-ttyd: could not send dropped image", error);
+        }
+      }
+    } finally {
+      imageReceiverActive = false;
     }
   };
 

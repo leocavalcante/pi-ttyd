@@ -98,9 +98,9 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   const window = {
     clearTimeout(id) { timeouts.delete(id); },
     setTimeout(callback, delay) {
+      assert.notEqual(delay, 0, "image transfer chunks must not yield to keyboard input");
       const id = ++nextTimeoutId;
-      if (delay === 0) queueMicrotask(callback);
-      else timeouts.set(id, callback);
+      timeouts.set(id, callback);
       return id;
     },
     term: {
@@ -169,34 +169,42 @@ test("waits for a Pi receiver and serializes concurrent image drops", async () =
   assert.equal(firstReadStarted, true);
   assert.equal(secondReadStarted, false);
   resolveFirstRead(firstBytes.buffer);
-  await Promise.all([firstDrop, secondDrop]);
+  await firstDrop;
+  assert.equal(secondReadStarted, false);
+  assert.equal(terminalInput.filter((entry) => entry.data === receiverQuery).length, 2);
+  assert.equal(terminalInput.at(-1).data, receiverQuery);
+
+  document.title = "__PI_TTYD_IMAGE_RX__:ready | ttyd";
+  onMutation();
+  await secondDrop;
 
   const encodedFirst = Buffer.from(firstBytes).toString("base64");
   const encodedSecond = Buffer.from(secondBytes).toString("base64");
   assert.deepEqual(dropEvents, ["prevented", "stopped", "prevented", "stopped"]);
   assert.equal(focused, true);
   assert.equal(secondReadStarted, true);
-  assert.deepEqual(terminalInput.map((entry) => entry.wasUserInput), [true, true, true, true, true, true, true]);
+  assert.deepEqual(terminalInput.map((entry) => entry.wasUserInput), [true, true, true, true, true, true, true, true]);
   assert.equal(
-    terminalInput.slice(1).map((entry) => entry.data).join(""),
+    terminalInput
+      .filter((entry) => entry.data !== receiverQuery)
+      .map((entry) => entry.data)
+      .join(""),
     `\u001e__PI_TTYD_IMAGE_V1__image/png\u001f${encodedFirst}__PI_TTYD_IMAGE_END_V1__` +
       `\u001e__PI_TTYD_IMAGE_V1__image/png\u001f${encodedSecond}__PI_TTYD_IMAGE_END_V1__`,
   );
 
-  document.title = "__PI_TTYD_IMAGE_RX__:inactive | ttyd";
-  onMutation();
-  const inactiveDrop = drop({
+  const dropAfterUnmarkedExit = drop({
     name: "after-exit.png",
     type: "image/png",
     size: 1,
     arrayBuffer() { throw new Error("must not read image without a receiver"); },
   });
   await Promise.resolve();
-  assert.equal(terminalInput.length, 8);
+  assert.equal(terminalInput.length, 9);
   assert.equal(terminalInput.at(-1).data, receiverQuery);
   [...timeouts.values()][0]();
-  await inactiveDrop;
-  assert.equal(terminalInput.length, 8);
+  await dropAfterUnmarkedExit;
+  assert.equal(terminalInput.length, 9);
   assert.match(warnings.at(-1)[0], /no active Pi image receiver/);
 });
 
