@@ -13,6 +13,7 @@ test("flashes the ttyd title and notifies for a settled Pi turn in a hidden tab"
     hidden: true,
     title: "ttyd - Terminal",
     querySelector: () => titleElement,
+    addEventListener() {},
   };
   const window = {
     clearTimeout() {},
@@ -41,4 +42,71 @@ test("flashes the ttyd title and notifies for a settled Pi turn in a hidden tab"
   assert.equal(notifications[0].title, "Pi");
   assert.equal(notifications[0].options.body, "Ready for input");
   assert.equal(document.title, "Pi ready | ttyd - Terminal");
+});
+
+test("prevents image drops from navigating and sends them through ttyd input", async () => {
+  const listeners = new Map();
+  const terminalInput = [];
+  let focused = false;
+  const titleElement = {};
+  const document = {
+    hidden: false,
+    title: "ttyd - Terminal",
+    querySelector: () => titleElement,
+    addEventListener(type, handler, capture) {
+      listeners.set(type, handler);
+      assert.equal(capture, true);
+    },
+  };
+  const window = {
+    clearTimeout() {},
+    setTimeout() { return 1; },
+    term: {
+      focus() { focused = true; },
+      input(data, wasUserInput) { terminalInput.push({ data, wasUserInput }); },
+    },
+  };
+  class MockMutationObserver {
+    constructor() {}
+    observe() {}
+  }
+  const imageBytes = Uint8Array.of(1, 2, 3, 4);
+  const file = {
+    name: "sample.png",
+    type: "image/png",
+    size: imageBytes.length,
+    arrayBuffer: async () => imageBytes.buffer,
+  };
+
+  runInNewContext(clientSource, {
+    document,
+    window,
+    MutationObserver: MockMutationObserver,
+    btoa,
+  });
+
+  let dragPrevented = false;
+  listeners.get("dragover")({
+    dataTransfer: { items: [{ kind: "file", type: "" }] },
+    preventDefault() { dragPrevented = true; },
+  });
+  assert.equal(dragPrevented, true);
+
+  let dropPrevented = false;
+  let propagationStopped = false;
+  await listeners.get("drop")({
+    dataTransfer: { files: [file] },
+    preventDefault() { dropPrevented = true; },
+    stopPropagation() { propagationStopped = true; },
+  });
+
+  const encoded = Buffer.from(imageBytes).toString("base64");
+  assert.equal(dropPrevented, true);
+  assert.equal(propagationStopped, true);
+  assert.equal(focused, true);
+  assert.deepEqual(terminalInput.map((entry) => entry.wasUserInput), [true, true, true]);
+  assert.equal(
+    terminalInput.map((entry) => entry.data).join(""),
+    `__PI_TTYD_IMAGE_V1__image/png\n${encoded}__PI_TTYD_IMAGE_END_V1__`,
+  );
 });
