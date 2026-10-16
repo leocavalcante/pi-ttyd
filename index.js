@@ -3,6 +3,16 @@ const TITLE_MARKER = "__PI_TTYD_TITLE__:";
 const DEFAULT_TITLE = "ttyd";
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 
+function terminalTitleSequence(title) {
+  const sequence = `\x1b]2;${title}\x07`;
+  if (!process.env.TMUX) return sequence;
+  return `\x1bPtmux;${sequence.replace(/\x1b/g, "\x1b\x1b")}\x1b\\`;
+}
+
+function writeTitle(title) {
+  process.stdout.write(terminalTitleSequence(title));
+}
+
 function sendTitle(ctx, title) {
   ctx.ui.setTitle(`${TITLE_MARKER}${encodeURIComponent(title)}`);
 }
@@ -34,6 +44,6 @@ export default function register(pi) {
   let sequence = 0;
   pi.on("agent_settled", () => {
     const eventId = `${process.pid}:${Date.now()}:${++sequence}`;
-    process.stdout.write(`\x1b]2;${READY_MARKER}:${eventId}\x07`);
+    writeTitle(`${READY_MARKER}:${eventId}`);
   });
 }

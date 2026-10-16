@@ -2,21 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import register from "../index.js";
 
-async function withEnvironment(value, callback) {
-  const previous = process.env.PI_TTYD_NOTIFY;
-  if (value === undefined) delete process.env.PI_TTYD_NOTIFY;
-  else process.env.PI_TTYD_NOTIFY = value;
+async function withEnvironment(values, callback) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 
   try {
     await callback();
   } finally {
-    if (previous === undefined) delete process.env.PI_TTYD_NOTIFY;
-    else process.env.PI_TTYD_NOTIFY = previous;
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 }
 
 test("does not register ttyd behavior unless enabled", async () => {
-  await withEnvironment(undefined, () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: undefined, TMUX: undefined }, () => {
     const registrations = [];
     const commands = [];
     register({
@@ -29,7 +34,7 @@ test("does not register ttyd behavior unless enabled", async () => {
 });
 
 test("sets and resets the ttyd tab title", async () => {
-  await withEnvironment("1", async () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: "1", TMUX: undefined }, async () => {
     const events = new Map();
     const commands = new Map();
     register({
@@ -66,7 +71,7 @@ test("sets and resets the ttyd tab title", async () => {
 });
 
 test("emits a title marker after the agent settles", async () => {
-  await withEnvironment("1", () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: "1", TMUX: undefined }, () => {
     const events = new Map();
     const originalWrite = process.stdout.write;
     const output = [];
@@ -82,6 +87,32 @@ test("emits a title marker after the agent settles", async () => {
       });
       events.get("agent_settled")();
       assert.match(output[0], /^\x1b\]2;__PI_TTYD__:\d+:\d+:\d+\x07$/);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+  });
+});
+
+test("wraps the settled marker in tmux passthrough", async () => {
+  await withEnvironment({ PI_TTYD_NOTIFY: "1", TMUX: "/tmp/tmux,123,0" }, () => {
+    const events = new Map();
+    const originalWrite = process.stdout.write;
+    const output = [];
+    process.stdout.write = (chunk) => {
+      output.push(String(chunk));
+      return true;
+    };
+
+    try {
+      register({
+        on: (name, handler) => events.set(name, handler),
+        registerCommand() {},
+      });
+      events.get("agent_settled")();
+      assert.match(
+        output[0],
+        /^\x1bPtmux;\x1b\x1b\]2;__PI_TTYD__:\d+:\d+:\d+\x07\x1b\\$/,
+      );
     } finally {
       process.stdout.write = originalWrite;
     }
