@@ -5,19 +5,22 @@ import { runInNewContext } from "node:vm";
 
 const clientSource = await readFile(new URL("../client.js", import.meta.url), "utf8");
 
-test("flashes the ttyd title and notifies for a settled Pi turn in a hidden tab", () => {
+test("sets explicit titles and restores them after a ready notification", () => {
   const notifications = [];
   let onMutation;
+  let restoreTitle;
   const titleElement = {};
+  let titleValue = "shell prompt | ttyd";
   const document = {
     hidden: true,
-    title: "ttyd - Terminal",
+    get title() {
+      return titleValue.replace(/[ \t\n\f\r]+/g, " ").trim();
+    },
+    set title(title) {
+      titleValue = title;
+    },
     querySelector: () => titleElement,
     addEventListener() {},
-  };
-  const window = {
-    clearTimeout() {},
-    setTimeout() { return 1; },
   };
   class MockMutationObserver {
     constructor(callback) { onMutation = callback; }
@@ -27,7 +30,14 @@ test("flashes the ttyd title and notifies for a settled Pi turn in a hidden tab"
     static permission = "granted";
     constructor(title, options) { notifications.push({ title, options }); }
   }
-  window.Notification = MockNotification;
+  const window = {
+    Notification: MockNotification,
+    clearTimeout() {},
+    setTimeout(callback) {
+      restoreTitle = callback;
+      return 1;
+    },
+  };
 
   runInNewContext(clientSource, {
     document,
@@ -35,13 +45,31 @@ test("flashes the ttyd title and notifies for a settled Pi turn in a hidden tab"
     Notification: MockNotification,
     MutationObserver: MockMutationObserver,
   });
-  document.title = "__PI_TTYD__:123:456:1 | ttyd - Terminal";
+  assert.equal(document.title, "ttyd");
   onMutation();
 
+  const requestedTitle = "Checkout  staging | agent 2";
+  const customTitle = "Checkout staging | agent 2";
+  document.title = `__PI_TTYD_TITLE__:${encodeURIComponent(requestedTitle)} | ttyd`;
+  onMutation();
+  assert.equal(document.title, customTitle);
+  onMutation();
+
+  document.title = "shell prompt | ttyd";
+  onMutation();
+  assert.equal(document.title, customTitle);
+  onMutation();
+
+  document.title = "__PI_TTYD__:123:456:1 | ttyd";
+  onMutation();
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].title, "Pi");
   assert.equal(notifications[0].options.body, "Ready for input");
-  assert.equal(document.title, "Pi ready | ttyd - Terminal");
+  assert.equal(document.title, `Pi ready | ${customTitle}`);
+  onMutation();
+
+  restoreTitle();
+  assert.equal(document.title, customTitle);
 });
 
 test("prevents image drops from navigating and sends them through ttyd input", async () => {

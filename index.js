@@ -1,11 +1,19 @@
-const TITLE_MARKER = "__PI_TTYD__";
+const READY_MARKER = "__PI_TTYD__";
+const TITLE_MARKER = "__PI_TTYD_TITLE__:";
+const DEFAULT_TITLE = "ttyd";
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 const IMAGE_TRANSFER_START = "__PI_TTYD_IMAGE_V1__";
 const IMAGE_TRANSFER_END = "__PI_TTYD_IMAGE_END_V1__";
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-const MAX_IMAGE_PAYLOAD_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 32;
+const MAX_IMAGE_BASE64_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
+const MAX_IMAGE_PAYLOAD_CHARS = MAX_IMAGE_BASE64_CHARS + 32;
 const MAX_PENDING_IMAGES = 4;
 const IMAGE_TRANSFER_TIMEOUT_MS = 30_000;
+
+function sendTitle(ctx, title) {
+  ctx.ui.setTitle(`${TITLE_MARKER}${encodeURIComponent(title)}`);
+}
 
 function decodeImage(payload) {
   const separator = payload.indexOf("\n");
@@ -17,7 +25,7 @@ function decodeImage(payload) {
     !SUPPORTED_IMAGE_TYPES.has(mimeType) ||
     data.length === 0 ||
     data.length % 4 !== 0 ||
-    data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 ||
+    data.length > MAX_IMAGE_BASE64_CHARS ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(data)
   ) {
     return undefined;
@@ -32,6 +40,7 @@ function decodeImage(payload) {
 }
 
 export default function register(pi) {
+  const notificationsEnabled = process.env.PI_TTYD_NOTIFY === "1";
   let sequence = 0;
   let pendingImages = [];
   let incomingTransfer;
@@ -119,6 +128,25 @@ export default function register(pi) {
     return passthrough ? { data: passthrough } : { consume: true };
   };
 
+  if (notificationsEnabled) {
+    pi.registerCommand("ttyd-title", {
+      description: "Set the ttyd tab title; omit the title to reset it",
+      handler: async (args, ctx) => {
+        const title = args.trim() || DEFAULT_TITLE;
+        if (CONTROL_CHARACTERS.test(title)) {
+          ctx.ui.notify("ttyd title cannot contain control characters", "warning");
+          return;
+        }
+
+        sendTitle(ctx, title);
+        ctx.ui.notify(
+          title === DEFAULT_TITLE ? "ttyd title reset" : `ttyd title set to: ${title}`,
+          "info",
+        );
+      },
+    });
+  }
+
   pi.on("session_start", (_event, ctx) => {
     unsubscribeTerminalInput?.();
     unsubscribeTerminalInput = undefined;
@@ -129,6 +157,7 @@ export default function register(pi) {
     if (ctx.mode === "tui") {
       unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => handleTerminalInput(data, ctx));
     }
+    if (notificationsEnabled) sendTitle(ctx, DEFAULT_TITLE);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
@@ -150,10 +179,10 @@ export default function register(pi) {
     return { action: "transform", text: event.text, images: [...(event.images ?? []), ...images] };
   });
 
-  if (process.env.PI_TTYD_NOTIFY === "1") {
+  if (notificationsEnabled) {
     pi.on("agent_settled", () => {
       const eventId = `${process.pid}:${Date.now()}:${++sequence}`;
-      process.stdout.write(`\x1b]2;${TITLE_MARKER}:${eventId}\x07`);
+      process.stdout.write(`\x1b]2;${READY_MARKER}:${eventId}\x07`);
     });
   }
 }

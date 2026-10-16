@@ -2,7 +2,9 @@
   const titleElement = document.querySelector("title");
   if (!titleElement) return;
 
-  const marker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+(.+))?$/;
+  const readyMarker = /^__PI_TTYD__:(\d+):(\d+):(\d+)(?:\s+\|\s+.*)?$/;
+  const titleMarker = /^__PI_TTYD_TITLE__:([^\s]*)(?:\s+\|\s+.*)?$/;
+  const normalizeTitle = (title) => title.replace(/[ \t\n\f\r]+/g, " ").trim();
   const imageTransferStart = "__PI_TTYD_IMAGE_V1__";
   const imageTransferEnd = "__PI_TTYD_IMAGE_END_V1__";
   const maxImageBytes = 4 * 1024 * 1024;
@@ -15,7 +17,9 @@
     ["gif", "image/gif"],
     ["webp", "image/webp"],
   ]);
+  let currentTitle = "ttyd";
   let lastEventId = "";
+  let lastAppliedTitle;
   let restoreTimer;
 
   const imageMimeType = (file) => {
@@ -104,30 +108,56 @@
   document.addEventListener("dragover", handleImageDragOver, true);
   document.addEventListener("drop", handleImageDrop, true);
 
+  const setPageTitle = (title) => {
+    if (document.title === title) return;
+    lastAppliedTitle = title;
+    document.title = title;
+  };
+
   const handleTitleChange = () => {
-    const match = marker.exec(document.title);
-    if (!match) return;
+    const title = document.title;
+    if (title === lastAppliedTitle) {
+      lastAppliedTitle = undefined;
+      return;
+    }
+    lastAppliedTitle = undefined;
 
-    const eventId = match.slice(1, 4).join(":");
-    if (eventId === lastEventId) return;
-    lastEventId = eventId;
-
-    const pageTitle = match[4] || "ttyd";
-    const flashedTitle = `Pi ready | ${pageTitle}`;
-
-    if (
-      document.hidden &&
-      "Notification" in window &&
-      Notification.permission === "granted"
-    ) {
-      new Notification("Pi", { body: "Ready for input" });
+    const titleMatch = titleMarker.exec(title);
+    if (titleMatch) {
+      try {
+        currentTitle = normalizeTitle(decodeURIComponent(titleMatch[1])) || "ttyd";
+      } catch {
+        return;
+      }
+      window.clearTimeout(restoreTimer);
+      setPageTitle(currentTitle);
+      return;
     }
 
-    document.title = flashedTitle;
-    window.clearTimeout(restoreTimer);
-    restoreTimer = window.setTimeout(() => {
-      if (document.title === flashedTitle) document.title = pageTitle;
-    }, 5000);
+    const readyMatch = readyMarker.exec(title);
+    if (readyMatch) {
+      const eventId = readyMatch.slice(1, 4).join(":");
+      if (eventId === lastEventId) return;
+      lastEventId = eventId;
+
+      if (
+        document.hidden &&
+        "Notification" in window &&
+        Notification.permission === "granted"
+      ) {
+        new Notification("Pi", { body: "Ready for input" });
+      }
+
+      const flashedTitle = `Pi ready | ${currentTitle}`;
+      setPageTitle(flashedTitle);
+      window.clearTimeout(restoreTimer);
+      restoreTimer = window.setTimeout(() => {
+        if (document.title === flashedTitle) setPageTitle(currentTitle);
+      }, 5000);
+      return;
+    }
+
+    if (title !== currentTitle) setPageTitle(currentTitle);
   };
 
   const observer = new MutationObserver(handleTitleChange);
@@ -136,5 +166,6 @@
     characterData: true,
     subtree: true,
   });
+  setPageTitle(currentTitle);
   window.__piTtydTitleObserver = observer;
 })();

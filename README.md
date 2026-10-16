@@ -1,14 +1,16 @@
 # pi-ttyd
 
-A small Pi extension and ttyd client script for browser notifications and image
-input.
+A small Pi extension and ttyd client script for browser tab titles, ready
+notifications, and image input.
 
-The extension sends a private terminal-title marker only when
-`PI_TTYD_NOTIFY=1`. The ttyd browser client observes that title change, briefly
-marks the tab as `Pi ready`, and shows a browser notification if the tab is
-hidden and notification permission is granted. The marker contains no prompt,
-response, or session text. Settlement means Pi is waiting for input; it does not
-mean the task succeeded.
+With `PI_TTYD_NOTIFY=1`, the extension resets the tab title to `ttyd` when a Pi
+session starts and registers `/ttyd-title <title>` to set a custom title. Run
+`/ttyd-title` with no argument to restore `ttyd`. When Pi settles, it sends a
+separate private terminal-title marker; the ttyd browser client briefly marks
+the tab as `Pi ready` and shows a browser notification if the tab is hidden and
+notification permission is granted. Markers contain no prompt, response, or
+session text. Settlement means Pi is waiting for input; it does not mean the
+task succeeded.
 
 With the client script and extension installed, drop a PNG, JPEG, GIF, or WebP
 image onto the ttyd page to attach it to your next prompt. The image stays out
@@ -24,7 +26,8 @@ Install the extension in Pi:
 pi install git:github.com/leocavalcante/pi-ttyd
 ```
 
-Enable it in the environment that starts ttyd, so Pi inherits the setting:
+Enable title changes and browser notifications in the environment that starts
+ttyd, so Pi inherits the setting:
 
 ```sh
 PI_TTYD_NOTIFY=1 ttyd ...
@@ -40,7 +43,9 @@ client. Add the contents of [`client.js`](client.js) in a separate `<script>`
 tag after ttyd's bundled application script and before `</body>` in the custom
 HTML passed with `ttyd --index`. Do not replace or edit ttyd's application
 bundle. The page must allow terminal title updates; avoid ttyd's fixed-title
-option if you use one. Start ttyd with `--writable` (`-W`) to enable image input.
+option if you use one. The client keeps the default title `ttyd`, applies
+`/ttyd-title` changes, and preserves the chosen title after the temporary
+`Pi ready` flash. Start ttyd with `--writable` (`-W`) to enable image input.
 
 Grant notification permission for the ttyd site in your browser's site settings.
 The page needs a secure context for the Notification API, such as `localhost`
@@ -51,6 +56,7 @@ seconds when a turn settles.
 
 ```sh
 npm test
+node --check index.js
 node --check client.js
 ```
 

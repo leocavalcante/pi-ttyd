@@ -1,9 +1,13 @@
-name: Test
+name: CI
 
 on:
-  push:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -12,7 +16,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: "22.19.0"
       - run: npm test
-      - run: node --check index.js
-      - run: node --check client.js
