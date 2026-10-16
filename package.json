@@ -1,7 +1,7 @@
 {
   "name": "pi-ttyd",
-  "version": "0.2.1",
-  "description": "Set the ttyd browser tab title and notify when Pi is ready.",
+  "version": "0.3.0",
+  "description": "Set ttyd's tab title, notify when Pi is ready, and accept dropped images.",
   "type": "module",
   "license": "MIT",
   "repository": {
