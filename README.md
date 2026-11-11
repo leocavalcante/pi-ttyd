@@ -1,5 +1,14 @@
 # pi-ttyd
 
+> **pi-ttyd is no longer maintained.** Published versions remain installable,
+> but they will not receive updates or security fixes. This repository is archived.
+>
+> Remove an npm installation with `pi remove npm:pi-ttyd`, or a Git installation
+> with `pi remove git:github.com/leocavalcante/pi-ttyd`.
+>
+> The documentation below is retained for existing users, not as a recommendation
+> to install the extension.
+
 A small Pi extension and ttyd client script for browser tab titles, ready
 notifications, and image input.
 
